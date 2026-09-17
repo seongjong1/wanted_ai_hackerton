@@ -48,6 +48,8 @@ class AccessLeg(BaseModel):
     steps: tuple[AccessStep, ...] = ()
     origin_point: AccessPoint | None = None
     destination_point: AccessPoint | None = None
+    # True when Kakao publictraffic was unavailable and duration is distance-estimated.
+    estimated: bool = False
 
     @model_validator(mode="after")
     def aware_departure(self) -> Self:

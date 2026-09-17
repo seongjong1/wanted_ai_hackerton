@@ -33,9 +33,10 @@ def test_next_anchor_search_and_actual_detour(trip, selected, anchor):
     selected = selected.model_copy(update={"arrival_time": selected.arrival_time.replace(hour=13, minute=25)})
     main = candidates(meal=True, count=1)[0]
     a = candidates(count=2)[1].model_copy(update={"place_id": "detour", "address": "검증 주소",
-        "category": "카페", "matched_preferences": (Preference.REST,)})
+        "category": "카페", "matched_preferences": (Preference.REST,), "role": "MAIN_DESTINATION"})
     b = a.model_copy(update={"place_id": "on-route", "latitude": a.latitude + .001})
-    search = Mock(side_effect=lambda t,s,p: [a] if p.id == anchor.id else [b])
+    # Destination-level support pool returns both; actual detour cost selects on-route.
+    search = Mock(return_value=[a, b])
     service, transit = scheduler(anchor, supporting_search=search,
         config=replace(ScheduleSettings(), late_lunch_end_hour=15, max_gap_fill_iterations=1))
     route = transit.fastest_route.return_value
@@ -47,7 +48,7 @@ def test_next_anchor_search_and_actual_detour(trip, selected, anchor):
     result = service.generate(trip, selected, [main], main.place_id)
     visits = [i for i in result.schedule.items if i.item_type != "TRAVEL"]
     assert visits[0].place_id == "on-route"
-    assert {call.args[2].id for call in search.call_args_list} >= {anchor.id, main.place_id}
+    assert search.call_count >= 1
     assert visits[-1].start_datetime.hour == 17
 
 

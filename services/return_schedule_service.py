@@ -254,7 +254,9 @@ class ReturnScheduleService:
                 "final_arrival_datetime": home_leg.arrival_time,
                 "destination_activity_cutoff": actual_cutoff,
                 "user_selected_place_id": preferred_place_id,
-                "anchor_status": "INCLUDED" if preferred_place_id else "",
+                "anchor_status": schedule.anchor_status or (
+                    "INCLUDED" if preferred_place_id else ""),
+                "anchor_meal_role": schedule.anchor_meal_role,
             })
             if validate_return(schedule, trip, origin, cache):
                 logger.info("return_schedule outcome=valid cutoff=%s", actual_cutoff.isoformat())
@@ -270,14 +272,17 @@ class ReturnScheduleService:
             return ScheduleResult(
                 "귀가 조건 미충족" if return_status != ReturnStatus.RETURN_UNKNOWN else "귀가 조회 실패",
                 notices=notices + result.notices)
+        included = bool(preferred_place_id and any(
+            i.place_id == preferred_place_id and i.item_type != "TRAVEL"
+            for i in result.schedule.items))
         schedule = result.schedule.model_copy(update={
             "trip_end_datetime": deadline,
             "return_status": return_status,
             "return_transport_candidates": return_candidates,
             "user_selected_place_id": preferred_place_id,
-            "anchor_status": ("INCLUDED" if preferred_place_id and any(
-                i.place_id == preferred_place_id and i.item_type != "TRAVEL"
-                for i in result.schedule.items) else
-                "INFEASIBLE" if preferred_place_id else ""),
+            "anchor_status": (
+                result.schedule.anchor_status
+                or ("INCLUDED" if included else "INFEASIBLE" if preferred_place_id else "")),
+            "anchor_meal_role": result.schedule.anchor_meal_role,
         })
         return ScheduleResult(result.status, schedule, notices + result.notices, result.ai_status)

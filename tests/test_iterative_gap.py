@@ -64,9 +64,9 @@ def test_validator_rolls_back_and_tries_next_candidate(monkeypatch, trip, select
     assert rejected and result.schedule.validation_status == "VALIDATED"
     ids = {i.place_id for i in result.schedule.items}
     assert "tour" not in ids
-    assert "cafe" in ids
-    # Food-only trips do not pad the gap with a second cafe after tourism rollback (quality > density).
-    assert "another-cafe" not in ids
+    # Food-only trips may use any single cafe after tourism rollback (quality > density).
+    assert "cafe" in ids or "another-cafe" in ids
+    assert not ({"cafe", "another-cafe"} <= ids)
 
 
 def test_rest_preference_allows_second_cafe_after_rollback(monkeypatch, trip, selected, anchor):

@@ -56,7 +56,9 @@ def render_trip_form() -> None:
                     "schedule_result", "schedule_preferred_place_id", "user_selected_place_id",
                     "schedule_anchor_pending", "origin_address_input", "origin_address_error",
                     "accommodation_query", "accommodation_choice", "accommodation_point",
-                    "accommodation_error", "accommodation_resolved_query", "provisional_hub_name"):
+                    "accommodation_error", "accommodation_resolved_query", "provisional_hub_name",
+                    "accommodation_source", "accommodation_recommend_result",
+                    "accommodation_recommend_signature"):
             st.session_state.pop(key, None)
         try:
             trip = TripRequest(
@@ -93,6 +95,38 @@ def _stale_accommodation_schedule() -> None:
         st.session_state.pop(key, None)
 
 
+def _clear_recommended_accommodation() -> None:
+    st.session_state.pop("accommodation_point", None)
+    st.session_state.pop("accommodation_source", None)
+    st.session_state.pop("accommodation_resolved_query", None)
+
+
+def _ensure_accommodation_recommendations() -> None:
+    """Search lodging candidates once per destination+hub; failures stay local."""
+    trip = st.session_state.trip_request
+    selected = st.session_state.get("selected_transport")
+    if selected is None:
+        return
+    from services.multiday_schedule_service import arrival_hub_query
+    signature = f"{trip.destination}|{arrival_hub_query(selected)}|{selected.arrival_time.isoformat()}"
+    if st.session_state.get("accommodation_recommend_signature") == signature:
+        return
+    from services.accommodation_recommend_service import search_accommodation_candidates
+    preferred_id = (st.session_state.get("user_selected_place_id")
+                    or st.session_state.get("schedule_preferred_place_id"))
+    main = st.session_state.get("place_result")
+    pool = list(main.candidates) if main else []
+    preferred = next((c for c in pool if c.place_id == preferred_id), None)
+    with st.spinner("여행 동선 기준 숙소 후보를 찾고 있습니다…"):
+        result = search_accommodation_candidates(
+            trip, selected, read_settings(),
+            preferred=preferred,
+            schedule=st.session_state.get("trip_schedule"),
+            place_pool=pool)
+    st.session_state.accommodation_recommend_result = result
+    st.session_state.accommodation_recommend_signature = signature
+
+
 def render_accommodation_panel() -> None:
     trip = st.session_state.trip_request
     if not (trip.has_accommodation and trip.end_date > trip.start_date):
@@ -109,8 +143,9 @@ def render_accommodation_panel() -> None:
     if choice == "숙소를 정했어요":
         if previous != "known":
             st.session_state.accommodation_choice = "known"
-            st.session_state.pop("accommodation_point", None)
+            _clear_recommended_accommodation()
             st.session_state.pop("accommodation_error", None)
+            st.session_state.accommodation_source = "manual"
             _stale_accommodation_schedule()
         st.text_input(
             "숙소명 또는 주소를 입력하세요",
@@ -131,6 +166,7 @@ def render_accommodation_panel() -> None:
             else:
                 st.session_state.accommodation_point = point
                 st.session_state.accommodation_resolved_query = query
+                st.session_state.accommodation_source = "manual"
                 st.session_state.pop("accommodation_error", None)
                 _stale_accommodation_schedule()
             st.rerun()
@@ -149,14 +185,61 @@ def render_accommodation_panel() -> None:
     elif choice == "아직 숙소를 정하지 않았어요":
         if previous != "unknown":
             st.session_state.accommodation_choice = "unknown"
-            st.session_state.pop("accommodation_point", None)
+            _clear_recommended_accommodation()
             st.session_state.pop("accommodation_error", None)
-            st.session_state.pop("accommodation_resolved_query", None)
+            st.session_state.pop("accommodation_recommend_result", None)
+            st.session_state.pop("accommodation_recommend_signature", None)
             _stale_accommodation_schedule()
         st.info(
-            "숙소가 아직 정해지지 않아 2일차 이후 동선은 임시 기준점(도착 거점)으로 계산됩니다. "
-            "숙소를 입력하면 일정을 다시 계산합니다."
+            "숙소를 선택하지 않으면 도착 거점을 임시 기준점으로 일정을 계산합니다. "
+            "아래에서 추천 숙소 후보를 고르면 전체 숙박일 기준으로 일정을 다시 계산합니다."
         )
+        selected = st.session_state.get("selected_transport")
+        if selected is None:
+            st.caption("교통편을 선택한 뒤 여행 동선 기준 숙소 후보를 보여드립니다.")
+        else:
+            _ensure_accommodation_recommendations()
+            result = st.session_state.get("accommodation_recommend_result")
+            point = st.session_state.get("accommodation_point")
+            if point is not None and st.session_state.get("accommodation_source") == "recommended":
+                st.markdown("### 선택한 숙소")
+                with st.container(border=True):
+                    st.write(f"**{point.name}**")
+                    if point.address:
+                        st.caption(point.address)
+                    st.caption("이 숙소를 전체 숙박일의 기준으로 사용합니다.")
+                if st.button("다른 숙소 후보 보기", key="clear_recommended_accommodation"):
+                    _clear_recommended_accommodation()
+                    _stale_accommodation_schedule()
+                    st.rerun()
+            else:
+                st.markdown("### 추천 숙소 후보")
+                if result is None:
+                    st.caption("숙소 후보를 준비하지 못했습니다.")
+                else:
+                    for notice in result.notices:
+                        st.caption(notice)
+                    if result.status == "failed" or result.status == "empty":
+                        pass
+                    elif result.candidates:
+                        for candidate in result.candidates:
+                            with st.container(border=True):
+                                st.write(f"**{candidate.place_name}**")
+                                if candidate.address:
+                                    st.caption(candidate.address)
+                                if candidate.reason:
+                                    st.caption(candidate.reason)
+                                st.caption("가격·객실 정보는 예약 서비스에서 확인 필요")
+                                if st.button("이 숙소 선택", key=f"select_lodging_{candidate.place_id}"):
+                                    st.session_state.accommodation_point = candidate.as_access_point()
+                                    st.session_state.accommodation_source = "recommended"
+                                    st.session_state.accommodation_resolved_query = candidate.place_name
+                                    _stale_accommodation_schedule()
+                                    st.rerun()
+                if st.button("아직 선택하지 않고 임시 일정 보기", key="skip_lodging_recommend"):
+                    _clear_recommended_accommodation()
+                    _stale_accommodation_schedule()
+                    st.rerun()
     else:
         st.session_state.accommodation_choice = None
         st.caption("숙박 일정을 만들려면 숙소 여부를 선택해주세요.")
@@ -207,21 +290,28 @@ def render_candidate(candidate: TransportCandidate, number: int, *, selectable: 
         if candidate.access is not None:
             boarding = candidate.access
             leg = boarding.access_leg
-            modes = {"BUS": "버스", "SUBWAY": "지하철", "WALKING": "도보", "SAME_PLACE": "같은 장소"}
-            st.write(f"접근 이동: {leg.origin} → {leg.destination} · {format_minutes(leg.duration_minutes)}")
-            st.caption(" + ".join(modes.get(mode, mode) for mode in leg.transport_modes)
-                       + f" · 환승 {leg.transfers}회")
+            modes = {"BUS": "버스", "SUBWAY": "지하철", "WALKING": "도보",
+                     "SAME_PLACE": "같은 장소", "ESTIMATED": "추정"}
+            if leg.estimated or leg.provider == "ESTIMATED" or "ESTIMATED" in leg.transport_modes:
+                st.write(f"접근 이동(추정): {leg.origin} → {leg.destination} · {format_minutes(leg.duration_minutes)}")
+                st.caption("실제 대중교통 경로가 아닙니다. 경로 API를 확인하지 못해 직선거리 기반 추정 시간을 사용합니다.")
+            else:
+                st.write(f"접근 이동: {leg.origin} → {leg.destination} · {format_minutes(leg.duration_minutes)}")
+                st.caption(" + ".join(modes.get(mode, mode) for mode in leg.transport_modes)
+                           + f" · 환승 {leg.transfers}회")
             st.write(f"출발 가능 {leg.departure_time:%H:%M} → 거점 도착 {leg.arrival_time:%H:%M:%S}"
                      f" → 승차 준비 완료 {boarding.ready_time:%H:%M:%S}")
             st.write(f"승차 버퍼 {format_minutes(boarding.buffer_minutes)} · 추가 대기 {format_minutes(boarding.waiting_minutes)}"
                      f" · 총 소요시간 {format_minutes(boarding.total_duration_minutes)}")
             steps = [step for step in leg.steps if step.mode.strip() and
                      (step.duration_seconds > 0 or step.distance_meters > 0 or step.guidance.strip())]
-            if steps:
+            if steps and not (leg.estimated or leg.provider == "ESTIMATED"):
                 with st.expander("접근 경로 자세히 보기", expanded=False):
                     for step in steps:
                         st.text(f"{modes.get(step.mode, step.mode)} · {format_minutes(step.duration_seconds / 60)}"
                                 f" · {step.distance_meters:g}m · {step.guidance}")
+            elif leg.estimated or leg.provider == "ESTIMATED":
+                st.caption(leg.note or "추정 접근 시간")
         if candidate.train_number:
             st.caption(f"열차 번호 {candidate.train_number}")
         if selectable and st.button("이 교통편 선택", key=f"select_transport_{number}"):
@@ -376,7 +466,7 @@ def render_schedule_items(items, previous) -> object:
     modes = {"BUS": "버스", "SUBWAY": "지하철", "WALKING": "도보"}
     for item in items:
         if item.start_datetime > previous:
-            st.caption(f"{previous:%m/%d %H:%M} ~ {item.start_datetime:%m/%d %H:%M} · 여유시간")
+            st.caption(f"{previous:%m/%d %H:%M} ~ {item.start_datetime:%m/%d %H:%M} · 자유시간")
         with st.container(border=True):
             st.write(f"**{item.start_datetime:%m/%d %H:%M} ~ {item.end_datetime:%m/%d %H:%M}**")
             if item.item_type == "TRAVEL":
@@ -439,12 +529,18 @@ def render_schedule_results() -> None:
     accommodation_point = st.session_state.get("accommodation_point")
     accommodation_query = (st.session_state.get("accommodation_query") or "").strip()
     resolved_query = st.session_state.get("accommodation_resolved_query")
-    confirmed = (lodging_choice == "known" and accommodation_point is not None
-                 and resolved_query == accommodation_query)
-    undecided = lodging_choice == "unknown"
+    accommodation_source = st.session_state.get("accommodation_source")
+    manual_confirmed = (lodging_choice == "known" and accommodation_point is not None
+                        and resolved_query == accommodation_query)
+    recommended_confirmed = (
+        lodging_choice == "unknown" and accommodation_point is not None
+        and accommodation_source == "recommended")
+    confirmed = manual_confirmed or recommended_confirmed
+    undecided = lodging_choice == "unknown" and not recommended_confirmed
     lodging_key = (
         f"unknown|{arrival_hub_query(selected)}" if undecided else
-        f"known|{getattr(accommodation_point, 'id', '')}|{resolved_query or ''}" if confirmed else
+        f"known|{getattr(accommodation_point, 'id', '')}|{resolved_query or ''}|{accommodation_source or ''}"
+        if confirmed else
         f"pending|{accommodation_query}"
     )
     signature = hashlib.sha256((trip.model_dump_json() + selected.model_dump_json() +
@@ -460,6 +556,8 @@ def render_schedule_results() -> None:
     st.write(f"귀가 목표: {trip.end_date:%m/%d} {trip.end_time:%H:%M} · {trip.departure}")
     if confirmed:
         st.write(f"숙소: {accommodation_point.name}")
+        if accommodation_source == "recommended":
+            st.caption("선택한 추천 숙소를 전체 숙박일의 기준으로 사용합니다.")
     elif undecided:
         schedule_preview = st.session_state.get("trip_schedule")
         if (schedule_preview and schedule_preview.accommodation
@@ -489,10 +587,10 @@ def render_schedule_results() -> None:
                 hub_name = arrival_hub_query(selected)
         st.write(f"숙소: 미정 · 임시 기준점: {hub_name}")
     with st.expander("일정 계산 기준 안내", expanded=False):
-        st.caption("일정 사이의 여유시간에는 가능한 경우 주변 관광·카페·휴식 장소를 추천하며, 적절한 후보가 없을 때만 여유시간으로 남깁니다.")
+        st.caption("일정 사이의 자유시간에는 가능한 경우 주변 관광·카페·휴식 장소를 추천하며, 적절한 후보가 없을 때만 자유시간으로 남깁니다.")
         st.caption("체류시간은 기본 추정값입니다. 영업시간과 실제 배차·지연은 방문 전에 확인해주세요.")
         if undecided:
-            st.caption("숙소 미정 시 2일차 이후 동선은 도착 거점을 임시 기준점으로 사용하며, 숙소를 확인하면 전체 일정을 다시 계산합니다.")
+            st.caption("숙소를 선택하지 않으면 도착 거점을 임시 기준점으로 사용하며, 추천 숙소 또는 직접 입력 숙소를 확인하면 전체 일정을 다시 계산합니다.")
     multiday = trip.has_accommodation and trip.end_date > trip.start_date
     can_generate = True
     if multiday:
@@ -507,9 +605,9 @@ def render_schedule_results() -> None:
         with st.spinner("장소 사이의 경로와 방문 가능한 시간을 확인하고 있습니다…"):
             result = generate_trip_schedule(
                 trip, selected, candidates, read_settings(), preferred,
-                None if undecided else (resolved_query or None),
+                None if (undecided or recommended_confirmed) else (resolved_query or None),
                 accommodation_undecided=undecided,
-                accommodation_point=None if undecided else accommodation_point)
+                accommodation_point=accommodation_point if confirmed else None)
         st.session_state.schedule_result = result
         st.session_state.schedule_signature = signature
         st.session_state.trip_schedule = result.schedule
@@ -527,26 +625,11 @@ def render_schedule_results() -> None:
     schedule = st.session_state.get("trip_schedule")
     if schedule is None or schedule.validation_status != "VALIDATED":
         return
-    if schedule.days:
-        tabs = st.tabs([f"{day.date:%m/%d} · {day.day_index}일차" for day in schedule.days])
-        for tab, day in zip(tabs, schedule.days):
-            with tab:
-                if day.role == "FIRST":
-                    st.write(f"**{day.activity_start:%m/%d %H:%M} · {schedule.arrival_point.name} 도착**")
-                else:
-                    st.write(f"**{day.activity_start:%H:%M} · {day.start_location.name} 출발**")
-                previous = render_schedule_items(day.items, day.activity_start)
-                if day.role != "FINAL" and schedule.accommodation:
-                    label = "임시 기준점" if schedule.accommodation_status == "PROVISIONAL" else "숙소"
-                    st.caption(f"{previous:%H:%M} {label} 도착 · {schedule.accommodation.name}")
-                elif day.role == "FINAL":
-                    st.caption(f"{previous:%H:%M} 귀가 시작 준비")
-                    render_return_journey(schedule)
-    else:
-        st.write(f"**{schedule.trip_start_datetime:%m/%d %H:%M} · {schedule.arrival_point.name} 도착**")
-        previous = render_schedule_items(schedule.items, schedule.trip_start_datetime)
-        st.caption(f"{previous:%m/%d %H:%M} 목적지 활동 종료 · 이동 {format_minutes(schedule.total_travel_minutes)} · 체류 {format_minutes(schedule.total_activity_minutes)}")
-        render_return_journey(schedule)
+    from services.schedule_visualization import render_schedule_visualization
+    render_schedule_visualization(
+        schedule, trip=trip, selected=selected, candidates=candidates,
+        render_raw_items=render_schedule_items,
+        render_return=render_return_journey)
 
 
 def render_diagnostics(settings: Settings) -> None:
@@ -566,7 +649,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
     st.set_page_config(page_title="AI 여행 플래너", page_icon="🧳", layout="centered")
     st.title("AI 여행 플래너")
-    st.caption("Phase 4.6 · 숙박 여행의 날짜별 일정과 마지막 날 귀가를 연결합니다.")
+    st.caption("Phase 5 · 날짜별 지도와 타임라인으로 여행 일정을 보여줍니다.")
     settings = read_settings()
     render_trip_form()
     render_diagnostics(settings)

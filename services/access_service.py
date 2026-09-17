@@ -1,17 +1,25 @@
 """Resolve precise places, then check access + buffer before boarding."""
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from pydantic import ValidationError
 
-from models.access import AccessLeg, AccessPoint, AccessRoute, BoardingAssessment
+from models.access import AccessLeg, AccessPoint, AccessRoute, AccessStep, BoardingAssessment
 from models.transport import KST, TransportCandidate, TransportType
 from models.trip_request import TripRequest
 from providers.http_client import ProviderError
 from providers.kakao_provider import KakaoProvider
 from providers.kakao_transit_provider import KakaoTransitProvider
 from services.location_service import normalize
+
+logger = logging.getLogger("travel_ai.access")
+
+# When Kakao publictraffic is unavailable (quota/outage), keep outbound alive with a
+# conservative urban-transit estimate from straight-line distance (~18 km/h effective).
+_ESTIMATE_METERS_PER_SECOND = 5.0
+_ESTIMATE_MIN_SECONDS = 300.0
 
 
 @dataclass
@@ -56,6 +64,9 @@ class AccessService:
                 infeasible += 1
                 continue
             accepted.append(candidate.model_copy(update={"access": assessment}))
+        logger.info(
+            "access_filter raw=%d accepted=%d infeasible=%d unknown=%d",
+            len(candidates), len(accepted), infeasible, unknown)
         return accepted, infeasible, unknown
 
     @staticmethod
@@ -103,6 +114,23 @@ class AccessService:
             raise ProviderError("ACCESS_TIME_UNKNOWN")
         return next(iter(matches.values()))
 
+    @staticmethod
+    def _estimate_route(origin: AccessPoint, destination: AccessPoint) -> AccessRoute:
+        from services.place_service import distance_meters
+        meters = distance_meters(origin, destination.y, destination.x)
+        seconds = max(_ESTIMATE_MIN_SECONDS, meters / _ESTIMATE_METERS_PER_SECOND)
+        return AccessRoute(
+            duration_seconds=seconds,
+            distance_meters=meters,
+            transfers=0,
+            steps=(AccessStep(
+                mode="ESTIMATED",
+                duration_seconds=seconds,
+                distance_meters=meters,
+                guidance="직선거리 기반 추정 · 실제 대중교통 경로 아님",
+            ),),
+        )
+
     def get_leg(self, origin_query: str, destination_query: str, departure: datetime,
                 cache: AccessCache | None = None) -> AccessLeg:
         cache = cache if cache is not None else AccessCache()
@@ -123,18 +151,30 @@ class AccessService:
                              origin_point=origin, destination_point=destination,
                              note="동일 장소 ID 확인. 승강장/승차장 이동은 승차 버퍼에 포함합니다.")
         route_key = (origin.id, destination.id)
+        estimated = False
         if route_key not in cache.routes:
             try:
                 cache.routes[route_key] = self.transit.fastest_route(origin, destination)
-            except ProviderError:
-                cache.routes[route_key] = None
+            except ProviderError as exc:
+                # Outbound must not collapse to zero when Mobility routing is down/quota-limited.
+                # Place resolution already succeeded; use a conservative distance estimate.
+                logger.warning("access_route outcome=estimate reason=%s", exc.code)
+                cache.routes[route_key] = self._estimate_route(origin, destination)
+                estimated = True
         route = cache.routes[route_key]
         if route is None:
             raise ProviderError("ACCESS_TIME_UNKNOWN")
+        # Re-detect estimate marker when reading a cached estimate route.
+        if not estimated and route.steps and route.steps[0].mode == "ESTIMATED":
+            estimated = True
         return AccessLeg(origin=origin.name, destination=destination.name,
                          transport_modes=tuple(dict.fromkeys(s.mode for s in route.steps)),
                          duration_minutes=route.duration_seconds / 60,
                          distance_meters=route.distance_meters, transfers=route.transfers,
-                         steps=route.steps, departure_time=departure, provider="Kakao publictraffic",
+                         steps=route.steps, departure_time=departure,
+                         provider=("ESTIMATED" if estimated else "Kakao publictraffic"),
                          origin_point=origin, destination_point=destination,
-                         note="API 예상 소요시간 기준. 지정 날짜/시각의 배차·실시간 지연은 보장하지 않습니다.")
+                         estimated=estimated,
+                         note=("경로 API를 확인하지 못해 직선거리 기반 추정 이동시간을 사용합니다. 실제 대중교통 경로가 아닙니다."
+                               if estimated else
+                               "API 예상 소요시간 기준. 지정 날짜/시각의 배차·실시간 지연은 보장하지 않습니다."))

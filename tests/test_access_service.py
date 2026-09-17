@@ -51,12 +51,17 @@ def test_filter_and_cached_route_for_same_terminal():
     assert places.search_places.call_count == 2
 
 
-@pytest.mark.parametrize("error", ["timeout", "http_429", "http_503", "ACCESS_TIME_UNKNOWN"])
-def test_unknown_access_excluded_and_failure_cached(error):
+@pytest.mark.parametrize("error", ["timeout", "http_429", "http_503", "http_400_quota", "ACCESS_TIME_UNKNOWN"])
+def test_transit_outage_uses_estimate_not_zero_outbound(error):
+    """Kakao routing outage/quota must not wipe TAGO outbound candidates."""
     service, _, transit = access_service()
     transit.fastest_route.side_effect = ProviderError(error)
     values, missed, unknown = service.filter_candidates([candidate(), candidate(hour=10)], trip(), AccessCache())
-    assert (values, missed, unknown) == ([], 0, 2)
+    assert unknown == 0 and missed == 0
+    assert len(values) == 2
+    assert values[0].access.access_leg.provider == "ESTIMATED"
+    assert values[0].access.access_leg.estimated is True
+    assert values[0].access.access_leg.transport_modes == ("ESTIMATED",)
     assert transit.fastest_route.call_count == 1
 
 
@@ -106,6 +111,7 @@ def test_sixth_candidate_survives_filter_before_top_five():
 def test_unknown_bus_does_not_remove_train():
     access, _, transit = access_service()
     transit.fastest_route.side_effect = ProviderError("timeout")
-    values, _, unknown = access.filter_candidates([candidate(),candidate(train=True)],trip(),AccessCache())
-    assert unknown == 1 and len(values) == 1
-    assert values[0].transport_type == TransportType.TRAIN
+    values, _, unknown = access.filter_candidates([candidate(), candidate(train=True)], trip(), AccessCache())
+    # Bus uses distance estimate; train is same-place and skips routing.
+    assert unknown == 0 and len(values) == 2
+    assert {c.transport_type for c in values} == {TransportType.EXPRESS_BUS, TransportType.TRAIN}

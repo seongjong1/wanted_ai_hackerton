@@ -372,6 +372,10 @@ def test_ui_lodging_choice_and_no_duplicate_warning(monkeypatch):
                         Mock(return_value=PlaceResult(candidates=values, destination_scope="구미")))
     monkeypatch.setattr("services.schedule_service.generate_trip_schedule", generate)
     monkeypatch.setattr("services.schedule_service.resolve_trip_accommodation", resolve)
+    from models.accommodation import AccommodationRecommendResult
+    monkeypatch.setattr(
+        "services.accommodation_recommend_service.search_accommodation_candidates",
+        Mock(return_value=AccommodationRecommendResult(status="empty", notices=("없음",))))
     app = AppTest.from_file("app.py").run()
     app.text_input[0].set_value(request.departure)
     app.text_input[1].set_value(request.destination)
@@ -467,6 +471,10 @@ def test_ui_provisional_then_confirm_stales(monkeypatch):
     monkeypatch.setattr("services.schedule_service.generate_trip_schedule", generate)
     monkeypatch.setattr("services.schedule_service.resolve_trip_accommodation",
                         Mock(return_value=(stay, None)))
+    from models.accommodation import AccommodationRecommendResult
+    monkeypatch.setattr(
+        "services.accommodation_recommend_service.search_accommodation_candidates",
+        Mock(return_value=AccommodationRecommendResult(status="empty", notices=("없음",))))
     app = AppTest.from_file("app.py").run()
     app.text_input[0].set_value(request.departure)
     app.text_input[1].set_value(request.destination)
@@ -496,6 +504,96 @@ def test_ui_provisional_then_confirm_stales(monkeypatch):
     assert generate.call_count == 2
     assert generate.call_args.kwargs.get("accommodation_undecided") is False
     assert app.session_state.trip_schedule.accommodation_status == "CONFIRMED"
+    assert not app.exception
+
+
+def test_ui_recommend_select_confirms_and_stales(monkeypatch):
+    """CASE 5/9/10 — recommend select → CONFIRMED; change lodging → schedule stale."""
+    from streamlit.testing.v1 import AppTest
+    from models.accommodation import AccommodationCandidate, AccommodationRecommendResult
+    from models.place import PlaceResult
+    from models.schedule import ScheduleResult, TripDaySchedule, TripSchedule
+    from test_local_origin import setup
+
+    service, trip_req, *_ = setup()
+    request = multiday_trip(trip_req)
+    transport_result = service.search(trip_req)
+    stay_a = lodging()
+    stay_b = AccessPoint(id="stay-b", name="구미 두번째 숙소", address="경북 구미시 숙소로 2",
+                         x=128.35, y=36.14, source="test")
+    hub = AccessPoint(id="station", name="구미역", x=128.33, y=36.12)
+    candidate_a = AccommodationCandidate(
+        place_id=stay_a.id, place_name=stay_a.name, address=stay_a.address,
+        category="숙박 > 호텔", latitude=stay_a.y, longitude=stay_a.x,
+        reason="이동 거리가 짧은 후보입니다.")
+    candidate_b = AccommodationCandidate(
+        place_id=stay_b.id, place_name=stay_b.name, address=stay_b.address,
+        category="숙박 > 호텔", latitude=stay_b.y, longitude=stay_b.x,
+        reason="여행 동선상 이동 부담이 적은 후보입니다.")
+
+    def day_for(stay, role, index, day_date):
+        start = hub if role == "FIRST" else stay
+        end = stay if role != "FINAL" else stay
+        return TripDaySchedule(
+            day_index=index, date=day_date, role=role, start_location=start,
+            end_location=end,
+            activity_start=datetime.combine(day_date, time(13 if role == "FIRST" else 9), KST),
+            activity_end=datetime.combine(day_date, time(21 if role != "FINAL" else 9), KST),
+            items=())
+
+    def schedule_for(stay, status):
+        days = (
+            day_for(stay, "FIRST", 1, request.start_date),
+            day_for(stay, "MIDDLE", 2, request.start_date + timedelta(days=1)),
+            day_for(stay, "FINAL", 3, request.end_date),
+        )
+        return TripSchedule(
+            trip_start_datetime=days[0].activity_start,
+            trip_end_datetime=datetime.combine(request.end_date, request.end_time, KST),
+            arrival_point=hub, items=(), days=days, accommodation=stay,
+            accommodation_status=status, return_status=ReturnStatus.RETURN_NONE,
+            validation_status="VALIDATED")
+
+    generate = Mock(side_effect=[
+        ScheduleResult("생성 완료", schedule_for(stay_a, "CONFIRMED")),
+        ScheduleResult("생성 완료", schedule_for(stay_b, "CONFIRMED")),
+    ])
+    recommend = Mock(return_value=AccommodationRecommendResult(
+        status="ok", candidates=(candidate_a, candidate_b),
+        notices=("여행 동선과 위치를 기준으로 찾은 숙소입니다. "
+                 "객실 가격과 예약 가능 여부는 숙박 예약 서비스에서 확인해주세요.",)))
+    monkeypatch.setattr("services.transport_service.search_transport", Mock(return_value=transport_result))
+    monkeypatch.setattr("services.place_service.search_places_for_trip",
+                        Mock(return_value=PlaceResult(candidates=pool(3), destination_scope="구미")))
+    monkeypatch.setattr("services.schedule_service.generate_trip_schedule", generate)
+    monkeypatch.setattr(
+        "services.accommodation_recommend_service.search_accommodation_candidates", recommend)
+    app = AppTest.from_file("app.py").run()
+    app.text_input[0].set_value(request.departure)
+    app.text_input[1].set_value(request.destination)
+    app.date_input[1].set_value(request.end_date)
+    app.checkbox[0].set_value(True)
+    app.multiselect[0].set_value(["맛집", "관광"])
+    app.button[0].click().run()
+    app.radio(key="accommodation_choice_radio").set_value("아직 숙소를 정하지 않았어요").run()
+    app.button(key="select_transport_1").click().run()
+    assert recommend.call_count >= 1
+    assert "예약 가능한 숙소" not in "\n".join(c.value for c in app.caption)
+    app.button(key=f"select_lodging_{stay_a.id}").click().run()
+    assert app.session_state.accommodation_point.id == stay_a.id
+    assert app.session_state.accommodation_source == "recommended"
+    app.button(key="search_nearby_places").click().run()
+    app.button(key="generate_schedule").click().run()
+    assert generate.call_count == 1
+    assert generate.call_args.kwargs.get("accommodation_undecided") is False
+    assert generate.call_args.kwargs.get("accommodation_point").id == stay_a.id
+    assert app.session_state.trip_schedule.accommodation_status == "CONFIRMED"
+    app.button(key="clear_recommended_accommodation").click().run()
+    assert "trip_schedule" not in app.session_state
+    app.button(key=f"select_lodging_{stay_b.id}").click().run()
+    app.button(key="generate_schedule").click().run()
+    assert generate.call_count == 2
+    assert generate.call_args.kwargs.get("accommodation_point").id == stay_b.id
     assert not app.exception
 
 
@@ -560,6 +658,10 @@ def test_ui_return_only_on_final_day_and_seat_copy(monkeypatch):
     monkeypatch.setattr("services.place_service.search_places_for_trip",
                         Mock(return_value=PlaceResult(candidates=pool(3), destination_scope="구미")))
     monkeypatch.setattr("services.schedule_service.generate_trip_schedule", generate)
+    from models.accommodation import AccommodationRecommendResult
+    monkeypatch.setattr(
+        "services.accommodation_recommend_service.search_accommodation_candidates",
+        Mock(return_value=AccommodationRecommendResult(status="empty", notices=("없음",))))
     app = AppTest.from_file("app.py").run()
     app.text_input[0].set_value(request.departure)
     app.text_input[1].set_value(request.destination)

@@ -53,8 +53,20 @@ class HttpClient:
                             retry_after = max(0.0, float(raw_delay))
                         except ValueError:
                             retry_after = 0.0
-                        raise ProviderError(f"http_{status}",
+                        code = f"http_{status}"
+                        # Detect Kakao Mobility quota without logging response bodies.
+                        if status == 400:
+                            try:
+                                err = response.json()
+                            except ValueError:
+                                err = {}
+                            if isinstance(err, dict) and (
+                                    err.get("code") == -10
+                                    or "limit" in str(err.get("message") or "").lower()):
+                                code = "http_400_quota"
+                        raise ProviderError(code,
                                             retryable=status in TRANSIENT_STATUSES)
+
                     try:
                         payload = response.json()
                     except ValueError:

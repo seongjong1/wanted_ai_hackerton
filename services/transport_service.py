@@ -278,19 +278,30 @@ class TransportService:
                     "시외버스는 당일 배차만 조회합니다. 여행 당일 다시 확인하세요."))
                 continue
             candidates, status = self._search_mode(trip, kind, provider, departure, arrival, resolver)
+            raw_count = len(candidates)
             if self.access_service is not None:
                 candidates, infeasible, unknown = self.access_service.filter_candidates(candidates, trip, access_cache)
+                access_count = len(candidates)
                 candidates = rank_candidates(candidates, trip)
-                logger.info("mode=%s access_valid=%d access_infeasible=%d access_unknown=%d",
-                            kind.value, len(candidates), infeasible, unknown)
+                logger.info(
+                    "mode=%s provider_raw=%d access_feasible=%d access_infeasible=%d "
+                    "access_unknown=%d after_rank=%d",
+                    kind.value, raw_count, access_count, infeasible, unknown, len(candidates))
                 if infeasible or unknown:
                     status = TransportStatus(kind, "일부 결과" if candidates else "접근 조건 미충족",
                         status.detail + f" · 접근 검증 후 {len(candidates)}개 · 탑승 불가 {infeasible}개 제외"
                         + f" · ACCESS_TIME_UNKNOWN {unknown}개 제외", status.departure_match, status.arrival_match)
+            else:
+                logger.info("mode=%s provider_raw=%d access_checked=false after_rank=%d",
+                            kind.value, raw_count, len(candidates))
             result.by_type[kind] = candidates[:self.per_type_limit]
             result.statuses.append(status)
         result.candidates = rank_candidates(
             [c for rows in result.by_type.values() for c in rows], trip)[:self.total_limit]
+        logger.info(
+            "outbound_final candidate_count=%d by_type=%s",
+            len(result.candidates),
+            {k.value: len(v) for k, v in result.by_type.items()})
         if any(c.access and c.access.access_leg.origin_point and c.access.access_leg.destination_point
                and c.access.access_leg.origin_point.id == c.access.access_leg.destination_point.id
                for c in result.candidates):

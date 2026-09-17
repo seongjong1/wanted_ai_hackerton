@@ -101,9 +101,16 @@ def accommodation_error_message(code: str | None = None) -> str:
     return "숙소 위치를 찾지 못했습니다. 숙소의 도로명 주소를 입력해주세요."
 
 
+def overnight_accommodations(dates: list, accommodation: AccessPoint) -> tuple[AccessPoint, ...]:
+    """Phase 4.8: same lodging every night. Future: one AccessPoint per overnight date."""
+    if len(dates) < 2:
+        return ()
+    return tuple(accommodation for _ in dates[:-1])
+
+
 PROVISIONAL_NOTICE = (
-    "숙소가 아직 정해지지 않아 2일차 이후 동선은 임시 기준점(도착 거점)으로 계산됩니다. "
-    "숙소를 입력하면 일정을 다시 계산합니다."
+    "숙소를 선택하지 않으면 도착 거점을 임시 기준점으로 일정을 계산합니다. "
+    "추천 숙소 후보에서 숙소를 고르거나 직접 입력하면 전체 일정을 다시 계산합니다."
 )
 
 
@@ -207,10 +214,47 @@ class MultidayScheduleService:
         exclude: set[str] = set()
         ai_status = "미사용"
         preferred_remaining = preferred_place_id
+        preferred_day_index = None
+        recorded_meal_role = ""
+
+        # Phase 4.7: restaurant MAIN may fit a later day better than a late DAY-1 arrival.
+        if preferred_place_id:
+            from services.schedule_service import _preferred_plan_score
+            best_probe = None
+            for index, day in enumerate(dates[:-1]):
+                role = "FIRST" if index == 0 else "MIDDLE"
+                if role == "FIRST":
+                    start = selected.arrival_time
+                    start_point = arrival
+                    deadline = datetime.combine(day, time(daily_end), KST)
+                else:
+                    start = datetime.combine(day, time(daily_start), KST)
+                    start_point = accommodation
+                    deadline = datetime.combine(day, time(daily_end), KST)
+                probe = self.activity.generate_window(
+                    trip, selected, list(candidates), start=start, deadline=deadline,
+                    start_point=start_point, preferred_place_id=preferred_place_id,
+                    exclude_ids=frozenset(), end_point=accommodation)
+                if not probe.schedule:
+                    continue
+                if not any(i.place_id == preferred_place_id and i.item_type != "TRAVEL"
+                           for i in probe.schedule.items):
+                    continue
+                score = _preferred_plan_score(probe.schedule.items, preferred_place_id)
+                if best_probe is None or score > best_probe[0]:
+                    best_probe = (score, index, probe.schedule.anchor_meal_role or "")
+            if best_probe is not None:
+                preferred_day_index = best_probe[1]
+                recorded_meal_role = best_probe[2]
+                logger.info("multiday_main outcome=day_selected index=%d meal_role=%s",
+                            preferred_day_index, recorded_meal_role)
 
         for index, day in enumerate(dates):
             role = "FIRST" if index == 0 else ("FINAL" if index == len(dates) - 1 else "MIDDLE")
-            preferred = preferred_remaining
+            if preferred_day_index is not None:
+                preferred = preferred_place_id if index == preferred_day_index else None
+            else:
+                preferred = preferred_remaining
             if role == "FIRST":
                 start = selected.arrival_time
                 start_point = arrival
@@ -243,8 +287,14 @@ class MultidayScheduleService:
                 return ScheduleResult(result.status or "일정 생성 실패",
                                       notices=notices + result.notices)
             day_items = result.schedule.items
-            notices.extend(result.notices)
+            # Avoid repeating "MAIN infeasible" notices when MAIN is reserved for another day.
+            for notice in result.notices:
+                if preferred is None and "포함하기 어렵습니다" in notice:
+                    continue
+                notices.append(notice)
             ai_status = result.ai_status or ai_status
+            if result.schedule.anchor_meal_role:
+                recorded_meal_role = result.schedule.anchor_meal_role
             end_location = end_point
             activity_end = day_items[-1].end_datetime
             for item in day_items:
@@ -270,17 +320,22 @@ class MultidayScheduleService:
             last_point, last_time, all_items, days_out, home_deadline, lodging_status)
         if return_result.schedule is None:
             status = getattr(return_result, "return_status", ReturnStatus.RETURN_INFEASIBLE)
+            included = bool(preferred_place_id and any(
+                i.place_id == preferred_place_id and i.item_type != "TRAVEL" for i in all_items))
             schedule = TripSchedule(
                 trip_start_datetime=selected.arrival_time, trip_end_datetime=home_deadline,
                 arrival_point=arrival, items=tuple(all_items), days=tuple(days_out),
                 accommodation=accommodation, accommodation_status=lodging_status,
+                accommodation_nights=overnight_accommodations(dates, accommodation),
                 return_status=status,
                 user_selected_place_id=preferred_place_id,
-                anchor_status=("INCLUDED" if preferred_place_id and any(
-                    i.place_id == preferred_place_id and i.item_type != "TRAVEL" for i in all_items) else
-                    "INFEASIBLE" if preferred_place_id else ""),
+                anchor_status=("INCLUDED" if included else "INFEASIBLE" if preferred_place_id else ""),
+                anchor_meal_role=recorded_meal_role if included else (
+                    "" if not preferred_place_id else recorded_meal_role),
                 validation_status="VALIDATED",
                 return_transport_candidates=getattr(return_result, "candidates", ()) or ())
+            if preferred_place_id and not included:
+                notices.append("선택한 장소를 현재 일정 조건 안에 포함하기 어렵습니다.")
             if any("확인하지 못했습니다" in n for n in return_result.notices):
                 schedule = schedule.model_copy(update={"return_status": ReturnStatus.RETURN_UNKNOWN})
             elif any("어렵습니다" in n or "귀가하기 어렵" in n for n in return_result.notices):
@@ -291,6 +346,10 @@ class MultidayScheduleService:
             return ScheduleResult("생성 완료", schedule, list(dict.fromkeys(notices + return_result.notices)), ai_status)
 
         schedule = return_result.schedule
+        if recorded_meal_role and not schedule.anchor_meal_role:
+            schedule = schedule.model_copy(update={"anchor_meal_role": recorded_meal_role})
+        if preferred_place_id and schedule.anchor_status == "INFEASIBLE":
+            notices.append("선택한 장소를 현재 일정 조건 안에 포함하기 어렵습니다.")
         if not validate_multiday(schedule, trip, accommodation):
             return ScheduleResult("일정 검증 실패", notices=list(dict.fromkeys(notices + [
                 "날짜별 숙소 연결을 검증하지 못했습니다."])))
@@ -423,19 +482,33 @@ class MultidayScheduleService:
             })
             new_days = tuple(days_out[:-1]) + (final_day,)
             flat = [i for d in new_days for i in d.items]
+            included = bool(preferred_place_id and any(
+                i.place_id == preferred_place_id and i.item_type != "TRAVEL" for i in flat))
+            meal_role = ""
+            if rebuilt.schedule and rebuilt.schedule.anchor_meal_role and included:
+                meal_role = rebuilt.schedule.anchor_meal_role
+            elif included and preferred_place_id:
+                pref_item = next(i for i in flat if i.place_id == preferred_place_id and i.item_type != "TRAVEL")
+                if pref_item.meal_slot and pref_item.meal_slot.endswith("점심"):
+                    meal_role = "LUNCH"
+                elif pref_item.meal_slot and pref_item.meal_slot.endswith("저녁"):
+                    meal_role = "DINNER"
+                else:
+                    meal_role = "NONE"
             schedule = TripSchedule(
                 trip_start_datetime=selected.arrival_time, trip_end_datetime=home_deadline,
                 arrival_point=arrival, items=tuple(flat), days=new_days,
                 accommodation=accommodation, accommodation_status=lodging_status,
+                accommodation_nights=overnight_accommodations(
+                    [d.date for d in new_days], accommodation),
                 return_journey=journey,
                 return_transport_candidates=tuple(c for c, _ in feasible[:5]),
                 return_status=ReturnStatus.RETURN_AVAILABLE,
                 final_arrival_datetime=home_leg.arrival_time,
                 destination_activity_cutoff=actual_cutoff,
                 user_selected_place_id=preferred_place_id,
-                anchor_status=("INCLUDED" if preferred_place_id and any(
-                    i.place_id == preferred_place_id and i.item_type != "TRAVEL" for i in flat)
-                    else "INFEASIBLE" if preferred_place_id else ""),
+                anchor_status=("INCLUDED" if included else "INFEASIBLE" if preferred_place_id else ""),
+                anchor_meal_role=meal_role,
                 validation_status="VALIDATED")
             if day_items and day_items[-1].item_type == "TRAVEL":
                 continue

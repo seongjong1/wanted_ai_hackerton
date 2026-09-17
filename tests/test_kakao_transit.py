@@ -4,7 +4,14 @@ import pytest
 
 from models.access import AccessPoint
 from providers.http_client import ProviderError
-from providers.kakao_transit_provider import KakaoTransitProvider
+from providers.kakao_transit_provider import KakaoTransitProvider, clear_route_cache
+
+
+@pytest.fixture(autouse=True)
+def _clear_transit_cache():
+    clear_route_cache()
+    yield
+    clear_route_cache()
 
 
 def route(seconds=1680):
@@ -56,3 +63,34 @@ def test_missing_key_does_not_call_network():
     with pytest.raises(ProviderError, match="missing_key"):
         KakaoTransitProvider("", http).fastest_route(*points())
     http.request_json.assert_not_called()
+
+
+def test_process_route_cache_reuses_identical_od(monkeypatch):
+    from providers import kakao_transit_provider as module
+    module.clear_route_cache()
+    http = Mock()
+    http.request_json.return_value = {"status": "OK", "routes": [route()]}
+    provider = KakaoTransitProvider("test-key-cache", http)
+    a, b = points()
+    first = provider.fastest_route(a, b)
+    second = provider.fastest_route(a, b)
+    other = KakaoTransitProvider("test-key-cache", http).fastest_route(a, b)
+    assert first.duration_seconds == second.duration_seconds == other.duration_seconds
+    assert http.request_json.call_count == 1
+    assert module.route_cache_size() >= 1
+    module.clear_route_cache()
+
+
+def test_process_route_cache_stores_quota_failure():
+    from providers import kakao_transit_provider as module
+    module.clear_route_cache()
+    http = Mock()
+    http.request_json.side_effect = ProviderError("http_400_quota")
+    provider = KakaoTransitProvider("test-key-quota", http)
+    a, b = points()
+    with pytest.raises(ProviderError, match="http_400_quota"):
+        provider.fastest_route(a, b)
+    with pytest.raises(ProviderError, match="http_400_quota"):
+        KakaoTransitProvider("test-key-quota", http).fastest_route(a, b)
+    assert http.request_json.call_count == 1
+    module.clear_route_cache()

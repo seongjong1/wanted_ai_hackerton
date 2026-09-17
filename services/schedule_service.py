@@ -21,6 +21,7 @@ from services.itinerary_suitability import (
     VisitRole, assess_place, classify_visit_role, refine_roles_with_groq, schedule_eligible,
     suitability_score, is_micro_landmark, activity_bucket, visited_buckets, diversity_penalty,
     allow_cafe_candidate, cafe_imbalanced)
+from services.meal_role import MealRole, resolve_meal_role, is_restaurant
 
 logger = logging.getLogger("travel_ai.schedule")
 
@@ -71,12 +72,20 @@ def hour_on(day: datetime, hour: int) -> datetime:
 
 
 def visit_slot(now: datetime, deadline: datetime, duration: int, meal: bool,
-               preference: Preference, used_meals: set[str], config: ScheduleSettings):
+               preference: Preference, used_meals: set[str], config: ScheduleSettings,
+               *, allowed_meal_labels: tuple[str, ...] | None = None):
+    """Pick the earliest feasible visit window.
+
+    For meals, ``allowed_meal_labels`` may restrict to 점심/저녁 (FLEXIBLE probes pass one label).
+    UNKNOWN opening hours never close a window — only time/route constraints do.
+    """
     day = now
     while day.date() <= deadline.date():
         windows = config.meal_windows if meal else (("", max(config.day_start_hour,
             config.night_start_hour if preference == Preference.NIGHT_VIEW else config.day_start_hour), config.day_end_hour),)
         for label, start_hour, end_hour in windows:
+            if meal and allowed_meal_labels is not None and label not in allowed_meal_labels:
+                continue
             if meal and label == "점심" and preference == Preference.FOOD:
                 end_hour = max(end_hour, config.late_lunch_end_hour)
             key = f"{day.date()}:{label}" if meal else None
@@ -86,6 +95,23 @@ def visit_slot(now: datetime, deadline: datetime, duration: int, meal: bool,
                 return start, end, key
         day = hour_on(day, 24)
     return None
+
+
+def _preferred_plan_score(items, preferred_id: str) -> tuple:
+    """Higher is better: preferred included, more visits, less travel, shorter long gaps."""
+    if not any(i.place_id == preferred_id and i.item_type != "TRAVEL" for i in items):
+        return (-1,)
+    visits = sum(1 for i in items if i.item_type != "TRAVEL")
+    travel = sum(i.duration_minutes for i in items if i.item_type == "TRAVEL")
+    long_gaps = 0.0
+    prev_end = None
+    for item in items:
+        if prev_end is not None:
+            gap = (item.start_datetime - prev_end).total_seconds() / 60
+            if gap >= 90:
+                long_gaps += gap
+        prev_end = item.end_datetime
+    return (1, visits, -travel, -long_gaps)
 
 
 def validate_schedule(schedule: TripSchedule, trip: TripRequest, selected: TransportCandidate,
@@ -167,7 +193,8 @@ class ScheduleService:
         self._role_overrides: dict[str, VisitRole] = {}
 
     def generate(self, trip: TripRequest, selected: TransportCandidate | None,
-                 candidates: list[PlaceCandidate], preferred_place_id: str | None = None) -> ScheduleResult:
+                 candidates: list[PlaceCandidate], preferred_place_id: str | None = None,
+                 *, preferred_meal_role: MealRole | str | None = None) -> ScheduleResult:
         if selected is None:
             return ScheduleResult("교통편 선택 필요", notices=["교통편을 먼저 선택해주세요."])
         hub = selected.arrival_place
@@ -182,13 +209,15 @@ class ScheduleService:
         deadline = datetime.combine(trip.end_date, trip.end_time, KST)
         return self.generate_window(trip, selected, candidates, start=selected.arrival_time,
                                     deadline=deadline, start_point=arrival,
-                                    preferred_place_id=preferred_place_id)
+                                    preferred_place_id=preferred_place_id,
+                                    preferred_meal_role=preferred_meal_role)
 
     def generate_window(self, trip: TripRequest, selected: TransportCandidate,
                         candidates: list[PlaceCandidate], *, start: datetime, deadline: datetime,
                         start_point: AccessPoint, preferred_place_id: str | None = None,
                         exclude_ids: frozenset[str] = frozenset(),
-                        end_point: AccessPoint | None = None) -> ScheduleResult:
+                        end_point: AccessPoint | None = None,
+                        preferred_meal_role: MealRole | str | None = None) -> ScheduleResult:
         """Build activities inside [start, deadline] from start_point; optionally finish at end_point."""
         if start >= deadline:
             return ScheduleResult("시간 부족", notices=["선택한 교통편으로 도착하면 여행 가능 시간이 부족합니다."])
@@ -272,55 +301,106 @@ class ScheduleService:
             except (ProviderError, ValidationError, ValueError):
                 ai_status = "기본 일정 생성"
                 logger.warning("schedule_ai outcome=fallback")
+        preferred_candidate = available.get(preferred_place_id) if preferred_place_id else None
+        meal_role = resolve_meal_role(preferred_candidate, preferred_meal_role)
+        # Restaurant MAIN defaults to FLEXIBLE: probe lunch and dinner, keep the better day plan.
+        if (preferred_place_id and preferred_candidate and is_restaurant(preferred_candidate)
+                and meal_role == MealRole.FLEXIBLE):
+            label_options: tuple[str | None, ...] = ("점심", "저녁")
+        elif meal_role == MealRole.LUNCH:
+            label_options = ("점심",)
+        elif meal_role == MealRole.DINNER:
+            label_options = ("저녁",)
+        else:
+            label_options = (None,)
         validation_failed = False
         supporting_cache = {}
         previous_anchor = self.return_anchor
         if end_point is not None:
             # Prefer supporting places that still leave a sensible path toward lodging / overnight base.
             self.return_anchor = end_point
+        best: tuple | None = None
         try:
-            for attempt in range(self.config.max_schedule_attempts):
-                items = self._build(window_trip, start, activity_deadline, arrival, ordered, preferred_place_id,
-                                    ai_ids if attempt == 0 else [], routes,
-                                    max(1, self.config.max_route_calls // 2) if self.supporting_search else None)
-                if not items:
-                    break
-                base_items = items
-                items, supporting = self._fill_gaps(window_trip, window_selected, arrival, items, routes,
-                                                    supporting_cache, available, exclude_ids)
-                items, supporting = self._rebalance_day_categories(
-                    window_trip, window_selected, arrival, items, routes, available, supporting)
-                schedule = TripSchedule(trip_start_datetime=start, trip_end_datetime=deadline,
-                                        arrival_point=arrival, items=tuple(items))
-                if supporting and not validate_schedule(schedule, window_trip, window_selected,
-                                                        available | supporting, routes, arrival, self.config, set(supporting)):
-                    logger.warning("supporting_schedule outcome=validation_failed fallback=base")
-                    items, supporting = base_items, {}
-                    schedule = schedule.model_copy(update={"items": tuple(items)})
-                if not validate_schedule(schedule, window_trip, window_selected, available | supporting,
-                                         routes, arrival, self.config, set(supporting)):
-                    validation_failed = True
-                    logger.warning("schedule outcome=validation_failed attempt=%d", attempt + 1)
-                    continue
-                if end_point is not None:
-                    finished = self._append_end_point(items, end_point, routes, deadline)
-                    if finished is None:
-                        validation_failed = True
-                        continue
-                    items = finished
+            for meal_label in label_options:
+                for attempt in range(self.config.max_schedule_attempts):
+                    items = self._build(
+                        window_trip, start, activity_deadline, arrival, ordered, preferred_place_id,
+                        ai_ids if attempt == 0 else [], routes,
+                        max(1, self.config.max_route_calls // 2) if self.supporting_search else None,
+                        preferred_meal_label=meal_label)
+                    if not items:
+                        break
+                    base_items = items
+                    items, supporting = self._fill_gaps(window_trip, window_selected, arrival, items, routes,
+                                                        supporting_cache, available, exclude_ids)
+                    items, supporting = self._rebalance_day_categories(
+                        window_trip, window_selected, arrival, items, routes, available, supporting)
                     schedule = TripSchedule(trip_start_datetime=start, trip_end_datetime=deadline,
                                             arrival_point=arrival, items=tuple(items))
-                schedule = schedule.model_copy(update={"validation_status": "VALIDATED", "items": tuple(
-                    i.model_copy(update={"validation_status": "VALIDATED"}) for i in items)})
-                notices = ["체류시간은 기본 추정값입니다. 영업시간과 실제 배차·지연은 방문 전에 확인해주세요."]
-                if preferred_place_id and not any(i.place_id == preferred_place_id and i.item_type != "TRAVEL" for i in items):
-                    notices.append("선택한 장소는 이동 경로·시간대·종료시간 조건을 충족하지 못해 제외했습니다.")
-                logger.info("schedule outcome=valid visits=%d route_queries=%d attempt=%d",
-                            len([i for i in items if i.item_type != "TRAVEL"]), len(routes), attempt + 1)
-                return ScheduleResult("생성 완료", schedule, notices, ai_status if attempt == 0 else "기본 일정 생성")
+                    if supporting and not validate_schedule(schedule, window_trip, window_selected,
+                                                            available | supporting, routes, arrival, self.config, set(supporting)):
+                        logger.warning("supporting_schedule outcome=validation_failed fallback=base")
+                        items, supporting = base_items, {}
+                        schedule = schedule.model_copy(update={"items": tuple(items)})
+                    if not validate_schedule(schedule, window_trip, window_selected, available | supporting,
+                                             routes, arrival, self.config, set(supporting)):
+                        validation_failed = True
+                        logger.warning("schedule outcome=validation_failed attempt=%d", attempt + 1)
+                        continue
+                    if end_point is not None:
+                        finished = self._append_end_point(items, end_point, routes, deadline)
+                        if finished is None:
+                            validation_failed = True
+                            continue
+                        items = finished
+                        schedule = TripSchedule(trip_start_datetime=start, trip_end_datetime=deadline,
+                                                arrival_point=arrival, items=tuple(items))
+                    preferred_included = bool(
+                        preferred_place_id and any(
+                            i.place_id == preferred_place_id and i.item_type != "TRAVEL" for i in items))
+                    chosen_role = meal_role
+                    if preferred_included and meal_label:
+                        chosen_role = MealRole.LUNCH if meal_label == "점심" else MealRole.DINNER
+                    elif preferred_included and meal_role == MealRole.NONE:
+                        chosen_role = MealRole.NONE
+                    schedule = schedule.model_copy(update={
+                        "validation_status": "VALIDATED",
+                        "items": tuple(i.model_copy(update={"validation_status": "VALIDATED"}) for i in items),
+                        "user_selected_place_id": preferred_place_id,
+                        "anchor_status": ("INCLUDED" if preferred_included else
+                                          "INFEASIBLE" if preferred_place_id else ""),
+                        "anchor_meal_role": (chosen_role.value if preferred_place_id else ""),
+                    })
+                    notices = ["체류시간은 기본 추정값입니다. 영업시간과 실제 배차·지연은 방문 전에 확인해주세요."]
+                    if preferred_place_id and not preferred_included:
+                        notices.append("선택한 장소를 현재 일정 조건 안에 포함하기 어렵습니다.")
+                    score = _preferred_plan_score(items, preferred_place_id or "")
+                    logger.info(
+                        "schedule outcome=valid visits=%d route_queries=%d attempt=%d meal_label=%s "
+                        "anchor=%s meal_role=%s",
+                        len([i for i in items if i.item_type != "TRAVEL"]), len(routes), attempt + 1,
+                        meal_label, schedule.anchor_status, schedule.anchor_meal_role)
+                    candidate = ScheduleResult(
+                        "생성 완료", schedule, notices, ai_status if attempt == 0 else "기본 일정 생성")
+                    if preferred_place_id:
+                        if preferred_included and (best is None or score > best[0]):
+                            best = (score, candidate)
+                        elif best is None and not preferred_included:
+                            best = (score, candidate)
+                    else:
+                        return candidate
+                    break  # next meal_label after first valid attempt for this label
+            if best is not None:
+                return best[1]
         finally:
             self.return_anchor = previous_anchor
             self._role_overrides = {}
+        if preferred_place_id:
+            return ScheduleResult(
+                "생성 완료" if not validation_failed else "일정 검증 실패",
+                notices=["선택한 장소를 현재 일정 조건 안에 포함하기 어렵습니다."] + (
+                    ["안전하게 검증된 일정을 만들지 못했습니다. 장소 후보나 여행 조건을 바꿔 다시 생성해주세요."]
+                    if validation_failed else []))
         if validation_failed:
             return ScheduleResult("일정 검증 실패", notices=["안전하게 검증된 일정을 만들지 못했습니다. 장소 후보나 여행 조건을 바꿔 다시 생성해주세요."])
         if routes and all(route is None for route in routes.values()):
@@ -392,12 +472,20 @@ class ScheduleService:
                     now = following.end_datetime
                     if following.item_type == "TRAVEL":
                         current = following.destination
-            # Prefer long bounded gaps (between planned stops) over trailing free-time,
-            # so afternoon slots fill before post-dinner padding.
-            gaps.sort(key=lambda row: (
-                0 if row[0] >= self.config.long_gap_minutes else 1,
-                0 if row[4] is not None else 1,
-                -row[0], row[1]))
+            # Prefer long daytime gaps (before evening meal window) so afternoon fills
+            # before post-dinner trailing padding; size breaks ties.
+            def gap_rank(row):
+                minutes, index, _now, _current, following, boundary = row
+                daytime = boundary.hour < 17 or (
+                    following is not None and following.start_datetime.hour <= 17)
+                return (
+                    0 if minutes >= self.config.long_gap_minutes else 1,
+                    0 if daytime else 1,
+                    0 if following is not None else 1,
+                    -minutes,
+                    index,
+                )
+            gaps.sort(key=gap_rank)
             inserted = False
             for minutes, index, now, current, following, boundary in gaps:
                 logger.info("supporting_gap minutes=%.1f route_queries=%d", minutes, len(routes))
@@ -647,7 +735,8 @@ class ScheduleService:
         logger.info("day_quality outcome=cafe_imbalance retained")
         return items, supporting
 
-    def _build(self, trip, start, deadline, arrival, candidates, preferred_id, ai_ids, routes, route_limit=None):
+    def _build(self, trip, start, deadline, arrival, candidates, preferred_id, ai_ids, routes, route_limit=None,
+               preferred_meal_label: str | None = None):
         current, now = arrival, start
         items, visited, meals, counts = [], set(), set(), {}
         radius = activity_radius_meters(trip.activity_radius, self.extended_radius)
@@ -692,9 +781,14 @@ class ScheduleService:
             feasible = []
             for preferred, score, c, preference, assessment in choices:
                 duration = assessment.duration_minutes
+                allowed = None
+                if (preferred_meal_label and preferred_id and c.place_id == preferred_id
+                        and is_meal(c)):
+                    allowed = (preferred_meal_label,)
                 # A filled meal window cannot become feasible by adding travel time.
                 if visit_slot(now, deadline, duration,
-                              is_meal(c), preference, meals, self.config) is None:
+                              is_meal(c), preference, meals, self.config,
+                              allowed_meal_labels=allowed) is None:
                     continue
                 target = point_for(c)
                 key = (current.id, target.id)
@@ -712,12 +806,16 @@ class ScheduleService:
                         continue
                 seconds = route.duration_seconds if route else 0
                 slot = visit_slot(now + timedelta(seconds=seconds), deadline,
-                                  duration, is_meal(c), preference, meals, self.config)
+                                  duration, is_meal(c), preference, meals, self.config,
+                                  allowed_meal_labels=allowed)
                 if slot is None:
                     continue
                 # Itinerary suitability + preference relevance − route/detour waiting − diversity.
                 waiting_minutes = max(0, (slot[0] - now).total_seconds() / 60 - seconds / 60)
                 utility = score - seconds / 60 - waiting_minutes / 6
+                # FLEXIBLE restaurant MAIN: slightly prefer the forced label's natural window fit.
+                if preferred and allowed:
+                    utility += 2
                 feasible.append((preferred, utility, c, preference, target, route, slot, assessment))
                 if preferred or len(feasible) >= self.config.shortlist_limit:
                     break

@@ -94,13 +94,31 @@ def test_limits_and_individual_geocoding_failure():
     assert places.search_places.call_count <= 4  # origin + destination context + two hub lookups
 
 
-def test_failed_access_keeps_other_hub():
-    service, trip, _, transit, _, _ = setup()
-    route = transit.fastest_route.return_value
-    transit.fastest_route.side_effect = lambda origin, hub: (_ for _ in ()).throw(ProviderError("timeout")) if hub.id == "near" else route
+def test_failed_hub_resolution_keeps_other_hub():
+    """Unresolved hub POI drops that hub; other hubs with schedules remain."""
+    service, trip, places, _, _, _ = setup()
+    original = places.search_places.side_effect
+
+    def search(query, **kwargs):
+        if query == "가까운역":
+            return []
+        return original(query, **kwargs)
+
+    places.search_places.side_effect = search
     result = service.search(trip)
     assert len(result.candidates) == 1
     assert result.candidates[0].departure_place == "서울"
+
+
+def test_transit_quota_keeps_outbound_with_estimate():
+    """Kakao Mobility quota must not zero-out TAGO outbound candidates."""
+    service, trip, _, transit, _, _ = setup()
+    transit.fastest_route.side_effect = ProviderError("http_400_quota")
+    result = service.search(trip)
+    assert result.candidates
+    assert all(c.access and c.access.is_feasible for c in result.candidates)
+    assert any(c.access.access_leg.provider == "ESTIMATED" and c.access.access_leg.estimated
+               for c in result.candidates)
 
 
 def test_expands_to_farther_hub_when_nearby_has_no_schedule():

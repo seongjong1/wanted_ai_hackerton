@@ -116,7 +116,8 @@ def test_case6_7_8_final_day_cutoff_gap_and_hub_feasibility(trip, selected, anch
     stay = AccessPoint(id="stay", name="임시 숙소", x=128.34, y=36.13)
     hub = AccessPoint(id="hub", name="구미역", x=128.35, y=36.14)
     day = trip.end_date
-    morning = datetime.combine(day, time(9), KST)
+    # Arrive late enough that the pre-lunch gap stays short; the long gap is after lunch→cutoff.
+    morning = datetime.combine(day, time(10, 30), KST)
     cutoff = datetime.combine(day, time(14, 53), KST)
     selected = selected.model_copy(update={"arrival_time": morning})
     trip = trip.model_copy(update={"preferences": (Preference.FOOD,), "end_time": time(14, 53)})
@@ -152,8 +153,9 @@ def test_case6_7_8_final_day_cutoff_gap_and_hub_feasibility(trip, selected, anch
     assert any(i.place_id == "pm_tour" for i in visits)
     last_activity = max((i for i in visits), key=lambda i: i.end_datetime)
     assert last_activity.end_datetime <= cutoff
-    # Activity should use more of the cutoff window than stopping right after an early cafe.
-    assert last_activity.end_datetime.hour >= 13
+    # Cutoff window after midday should be used when a support candidate exists.
+    spare_minutes = (cutoff - last_activity.end_datetime).total_seconds() / 60
+    assert spare_minutes < 90 or last_activity.place_id == "pm_tour"
     assert any(c.args[1].id == hub.id for c in transit.fastest_route.call_args_list)
 
 

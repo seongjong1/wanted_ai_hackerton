@@ -92,13 +92,18 @@ class TripSchedule(BaseModel):
     accommodation: AccessPoint | None = None
     # CONFIRMED = user lodging; PROVISIONAL = overnight base is destination hub (lodging undecided).
     accommodation_status: Literal["", "CONFIRMED", "PROVISIONAL"] = ""
+    # Future: per-night lodging points. Empty ⇒ single ``accommodation`` applies to every overnight.
+    accommodation_nights: tuple[AccessPoint, ...] = ()
     return_journey: ReturnJourney | None = None
     return_transport_candidates: tuple[TransportCandidate, ...] = ()
     return_status: ReturnStatus = ReturnStatus.RETURN_NONE
     final_arrival_datetime: datetime | None = None
     destination_activity_cutoff: datetime | None = None
     user_selected_place_id: str | None = None
+    # INCLUDED | INFEASIBLE | "" — MAIN anchor placement status (Phase 4.7).
     anchor_status: str = ""
+    # LUNCH | DINNER | FLEXIBLE | NONE | "" — meal-slot role chosen for MAIN (not Place Importance).
+    anchor_meal_role: str = ""
     validation_status: Literal["UNVALIDATED", "VALIDATED"] = "UNVALIDATED"
 
     @model_validator(mode="after")

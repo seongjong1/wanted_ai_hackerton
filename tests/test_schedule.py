@@ -121,7 +121,9 @@ def test_preferred_place_and_safe_omission(trip, selected, anchor):
     transit.fastest_route.side_effect = lambda a,b: route.model_copy(update={"duration_seconds":50000}) if b.id=="3" else route
     result = service.generate(trip, selected, candidates(), "3")
     assert all(i.place_id != "3" for i in result.schedule.items)
-    assert any("선택한 장소" in text and "제외" in text for text in result.notices)
+    assert any("포함하기 어렵습니다" in text or ("선택한 장소" in text and "제외" in text)
+               for text in result.notices)
+    assert result.schedule is None or result.schedule.anchor_status == "INFEASIBLE"
 
 
 def test_missing_inputs_and_budget(trip, selected, anchor):

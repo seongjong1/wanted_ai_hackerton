@@ -28,7 +28,7 @@ class ScheduleSettings:
     shortlist_limit: int = 3
     max_visits: int = 8
     max_schedule_days: int = 8
-    max_route_calls: int = 24
+    max_route_calls: int = 32
     max_schedule_attempts: int = 2
     max_distance_meters: int = 20000
     day_start_hour: int = 9
@@ -47,6 +47,13 @@ class ScheduleSettings:
     default_daily_end_hour: int = 21
     # When a day starts and ends at the same accommodation, reserve this travel buffer.
     accommodation_return_buffer_minutes: int = 40
+    # Phase 4.8 lodging recommendations (Kakao Local only; no hallucinated ratings/prices).
+    accommodation_search_queries: tuple[str, ...] = ("호텔", "숙박", "모텔")
+    accommodation_search_pages: int = 1
+    accommodation_search_size: int = 15
+    accommodation_prefilter_limit: int = 5
+    accommodation_route_eval_limit: int = 5
+    accommodation_recommend_limit: int = 3
     meal_windows: tuple[tuple[str, int, int], ...] = (("점심", 11, 15), ("저녁", 17, 20))
 
     def __post_init__(self):
@@ -62,7 +69,10 @@ class ScheduleSettings:
                    self.min_supporting_activity_gap_minutes, self.supporting_search_limit,
                    self.max_gap_fill_iterations, self.long_gap_minutes, self.very_long_gap_minutes,
                    self.gap_safety_buffer_minutes,
-                   self.accommodation_return_buffer_minutes)
+                   self.accommodation_return_buffer_minutes,
+                   self.accommodation_search_pages, self.accommodation_search_size,
+                   self.accommodation_prefilter_limit, self.accommodation_route_eval_limit,
+                   self.accommodation_recommend_limit)
         if any(v <= 0 for v in numbers) or self.max_schedule_attempts > 3:
             raise ValueError("Invalid schedule limits")
         if not 0 <= self.day_start_hour < self.day_end_hour <= 24 or not 0 <= self.night_start_hour < 24:
@@ -75,6 +85,14 @@ class ScheduleSettings:
             raise ValueError("Invalid late lunch limit")
         if self.min_schedule_suitability > 100 or self.min_gap_fill_suitability > 100:
             raise ValueError("Invalid suitability thresholds")
+        if not self.accommodation_search_queries:
+            raise ValueError("Accommodation search queries required")
+        if not (1 <= self.accommodation_recommend_limit
+                <= self.accommodation_route_eval_limit
+                <= self.accommodation_prefilter_limit <= 15):
+            raise ValueError("Invalid accommodation recommend limits")
+        if not 1 <= self.accommodation_search_pages <= 3 or not 1 <= self.accommodation_search_size <= 15:
+            raise ValueError("Invalid accommodation search pagination")
 
 
 @dataclass(frozen=True)
@@ -140,7 +158,10 @@ def load_settings(secrets: Mapping[str, object] | None = None,
             supporting_sightseeing_minutes=limit("SCHEDULE_SUPPORTING_SIGHTSEEING_MINUTES", 40, 90),
             min_schedule_suitability=limit("MIN_SCHEDULE_SUITABILITY", 40, 100),
             min_gap_fill_suitability=limit("MIN_GAP_FILL_SUITABILITY", 45, 100),
-            max_route_calls=limit("MAX_SCHEDULE_ROUTE_CALLS", 24, 40),
+            max_route_calls=limit("MAX_SCHEDULE_ROUTE_CALLS", 32, 48),
             max_schedule_attempts=limit("MAX_SCHEDULE_ATTEMPTS", 2, 3),
+            accommodation_prefilter_limit=limit("ACCOMMODATION_PREFILTER_LIMIT", 5, 15),
+            accommodation_route_eval_limit=limit("ACCOMMODATION_ROUTE_EVAL_LIMIT", 5, 10),
+            accommodation_recommend_limit=limit("ACCOMMODATION_RECOMMEND_LIMIT", 3, 5),
         ),
     )
