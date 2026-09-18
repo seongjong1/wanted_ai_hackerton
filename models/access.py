@@ -63,6 +63,24 @@ class AccessLeg(BaseModel):
         return self.departure_time + timedelta(minutes=self.duration_minutes)
 
 
+def is_estimated_access(leg: object) -> bool:
+    """True for straight-line fallback access; False for confirmed Kakao routes.
+
+    UI and model must agree. Older AccessLeg instances may lack `estimated` and only
+    mark fallback via provider or transport_modes; do not AttributeError on those.
+    UNKNOWN (no AccessLeg) is not this helper's concern.
+    """
+    if bool(getattr(leg, "estimated", False)):
+        return True
+    if getattr(leg, "provider", "") == "ESTIMATED":
+        return True
+    modes = getattr(leg, "transport_modes", ()) or ()
+    try:
+        return "ESTIMATED" in modes
+    except TypeError:
+        return False
+
+
 @dataclass(frozen=True)
 class BoardingAssessment:
     access_leg: AccessLeg

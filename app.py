@@ -11,6 +11,7 @@ from config import Settings, load_settings
 from models.trip_request import Preference, RADIUS_OPTIONS, TripRequest
 from services.health_service import check_connections
 from services.transport_service import search_transport
+from models.access import is_estimated_access
 from models.transport import TransportCandidate, TransportType
 from services.place_service import search_places_for_trip, place_reason, activity_radius_meters
 
@@ -292,26 +293,28 @@ def render_candidate(candidate: TransportCandidate, number: int, *, selectable: 
             leg = boarding.access_leg
             modes = {"BUS": "버스", "SUBWAY": "지하철", "WALKING": "도보",
                      "SAME_PLACE": "같은 장소", "ESTIMATED": "추정"}
-            if leg.estimated or leg.provider == "ESTIMATED" or "ESTIMATED" in leg.transport_modes:
+            estimated_access = is_estimated_access(leg)
+            if estimated_access:
                 st.write(f"접근 이동(추정): {leg.origin} → {leg.destination} · {format_minutes(leg.duration_minutes)}")
                 st.caption("실제 대중교통 경로가 아닙니다. 경로 API를 확인하지 못해 직선거리 기반 추정 시간을 사용합니다.")
             else:
                 st.write(f"접근 이동: {leg.origin} → {leg.destination} · {format_minutes(leg.duration_minutes)}")
-                st.caption(" + ".join(modes.get(mode, mode) for mode in leg.transport_modes)
-                           + f" · 환승 {leg.transfers}회")
+                st.caption(" + ".join(modes.get(mode, mode) for mode in getattr(leg, "transport_modes", ()))
+                           + f" · 환승 {getattr(leg, 'transfers', 0)}회")
             st.write(f"출발 가능 {leg.departure_time:%H:%M} → 거점 도착 {leg.arrival_time:%H:%M:%S}"
                      f" → 승차 준비 완료 {boarding.ready_time:%H:%M:%S}")
             st.write(f"승차 버퍼 {format_minutes(boarding.buffer_minutes)} · 추가 대기 {format_minutes(boarding.waiting_minutes)}"
                      f" · 총 소요시간 {format_minutes(boarding.total_duration_minutes)}")
-            steps = [step for step in leg.steps if step.mode.strip() and
-                     (step.duration_seconds > 0 or step.distance_meters > 0 or step.guidance.strip())]
-            if steps and not (leg.estimated or leg.provider == "ESTIMATED"):
+            steps = [step for step in getattr(leg, "steps", ()) if getattr(step, "mode", "").strip() and
+                     (getattr(step, "duration_seconds", 0) > 0 or getattr(step, "distance_meters", 0) > 0
+                      or getattr(step, "guidance", "").strip())]
+            if steps and not estimated_access:
                 with st.expander("접근 경로 자세히 보기", expanded=False):
                     for step in steps:
                         st.text(f"{modes.get(step.mode, step.mode)} · {format_minutes(step.duration_seconds / 60)}"
                                 f" · {step.distance_meters:g}m · {step.guidance}")
-            elif leg.estimated or leg.provider == "ESTIMATED":
-                st.caption(leg.note or "추정 접근 시간")
+            elif estimated_access:
+                st.caption(getattr(leg, "note", "") or "추정 접근 시간")
         if candidate.train_number:
             st.caption(f"열차 번호 {candidate.train_number}")
         if selectable and st.button("이 교통편 선택", key=f"select_transport_{number}"):

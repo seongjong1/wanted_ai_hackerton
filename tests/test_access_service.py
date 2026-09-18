@@ -46,6 +46,9 @@ def test_filter_and_cached_route_for_same_terminal():
                                                         trip(), AccessCache())
     assert (len(values), missed, unknown) == (2, 1, 0)
     assert values[0].access.access_leg.duration_minutes == 28
+    assert values[0].access.access_leg.estimated is False
+    assert values[0].access.access_leg.provider == "Kakao publictraffic"
+    assert "ESTIMATED" not in values[0].access.access_leg.transport_modes
     assert values[0].access.ready_time == datetime(2026,10,1,9,43,tzinfo=KST)
     assert transit.fastest_route.call_count == 1
     assert places.search_places.call_count == 2
@@ -71,6 +74,7 @@ def test_same_verified_point_skips_routing_not_buffer():
                                                   trip(), AccessCache())
     assert len(values) == 1 and missed == 1
     assert values[0].access.access_leg.duration_minutes == 0
+    assert values[0].access.access_leg.estimated is False
     transit.fastest_route.assert_not_called()
 
 

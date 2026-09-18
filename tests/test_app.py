@@ -99,3 +99,58 @@ def test_access_breakdown_render_and_selection(monkeypatch):
     assert any("09:43:00" in item.value for item in app.markdown)
     app.button(key="select_transport_1").click().run()
     assert app.session_state.selected_transport.access.is_feasible
+
+
+def _render_access_app(monkeypatch, leg):
+    from datetime import datetime
+    from models.access import BoardingAssessment
+    from models.transport import KST, TransportType
+    from services.transport_service import convert_candidate
+    candidate = convert_candidate({"depPlaceNm": "서울경부", "arrPlaceNm": "부산",
+                                   "depPlandTime": "202610011000", "arrPlandTime": "202610011300",
+                                   "charge": "30000"}, TransportType.EXPRESS_BUS)
+    candidate = candidate.model_copy(
+        update={"access": BoardingAssessment(leg, 15, candidate.departure_time, candidate.arrival_time)})
+    monkeypatch.setattr("services.transport_service.search_transport",
+                        Mock(return_value=TransportResult(candidates=[candidate], access_checked=True)))
+    monkeypatch.setenv("ENABLE_API_DIAGNOSTICS", "false")
+    app = AppTest.from_file("app.py").run()
+    app.text_input[0].set_value("서울역")
+    app.text_input[1].set_value("부산")
+    app.multiselect[0].set_value(["관광"])
+    return app.button[0].click().run(), candidate
+
+
+def test_render_candidate_estimated_field_does_not_attribute_error(monkeypatch):
+    from datetime import datetime
+    from models.access import AccessLeg, AccessStep
+    from models.transport import KST
+    leg = AccessLeg(
+        origin="서울역", destination="서울경부", transport_modes=("ESTIMATED",),
+        duration_minutes=20, departure_time=datetime(2026, 10, 1, 9, tzinfo=KST),
+        provider="ESTIMATED", estimated=True, note="직선거리 기반 추정",
+        steps=(AccessStep(mode="ESTIMATED", duration_seconds=1200, distance_meters=6000,
+                          guidance="직선거리 기반 추정 · 실제 대중교통 경로 아님"),),
+    )
+    assert hasattr(leg, "estimated") and leg.estimated is True
+    app, _ = _render_access_app(monkeypatch, leg)
+    assert not app.exception
+    visible = "\n".join(item.value for elements in (app.markdown, app.caption) for item in elements)
+    assert "접근 이동(추정)" in visible
+    assert "실제 대중교통 경로가 아닙니다" in visible
+
+
+def test_render_candidate_provider_estimated_without_flag_still_shows_estimate(monkeypatch):
+    from datetime import datetime
+    from models.access import AccessLeg
+    from models.transport import KST
+    leg = AccessLeg(
+        origin="서울역", destination="서울경부", transport_modes=("WALKING",),
+        duration_minutes=20, departure_time=datetime(2026, 10, 1, 9, tzinfo=KST),
+        provider="ESTIMATED", estimated=False,
+    )
+    app, _ = _render_access_app(monkeypatch, leg)
+    assert not app.exception
+    visible = "\n".join(item.value for elements in (app.markdown, app.caption) for item in elements)
+    assert "접근 이동(추정)" in visible
+    assert "실제 대중교통 경로가 아닙니다" in visible

@@ -3,7 +3,7 @@ from datetime import datetime
 import pytest
 from pydantic import ValidationError
 
-from models.access import AccessLeg, BoardingAssessment
+from models.access import AccessLeg, BoardingAssessment, is_estimated_access
 from models.transport import KST
 
 
@@ -49,3 +49,28 @@ def test_user_28_minute_example():
                                 datetime(2026, 10, 1, 13, tzinfo=KST))
     assert result.ready_time.minute == 43
     assert not result.is_feasible
+
+
+def test_confirmed_access_leg_estimated_defaults_false():
+    access = leg()
+    assert "estimated" in AccessLeg.model_fields
+    assert access.estimated is False
+    assert is_estimated_access(access) is False
+
+
+def test_is_estimated_access_keeps_legacy_provider_and_mode_markers():
+    from types import SimpleNamespace
+    confirmed = SimpleNamespace(provider="Kakao publictraffic", transport_modes=("SUBWAY",))
+    assert not hasattr(confirmed, "estimated")
+    assert is_estimated_access(confirmed) is False
+    by_provider = SimpleNamespace(provider="ESTIMATED", transport_modes=("WALKING",))
+    assert is_estimated_access(by_provider) is True
+    by_mode = SimpleNamespace(provider="Kakao publictraffic", transport_modes=("ESTIMATED",))
+    assert is_estimated_access(by_mode) is True
+    by_flag = SimpleNamespace(estimated=True, provider="Kakao publictraffic", transport_modes=("SUBWAY",))
+    assert is_estimated_access(by_flag) is True
+    explicit = AccessLeg(origin="서울역", destination="서울경부", transport_modes=("WALKING",),
+                         duration_minutes=20, departure_time=datetime(2026, 10, 1, 9, tzinfo=KST),
+                         provider="ESTIMATED", estimated=False)
+    assert explicit.estimated is False
+    assert is_estimated_access(explicit) is True
