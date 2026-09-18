@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from models.access import AccessPoint
 from models.place import PlaceCandidate
@@ -17,7 +17,7 @@ from models.transport import TransportCandidate, TransportType
 from models.trip_request import TripRequest
 
 TimelineKind = Literal[
-    "ARRIVAL", "DEPARTURE", "ACTIVITY", "TRAVEL", "FREE_TIME",
+    "ARRIVAL", "DEPARTURE", "DAY_START", "ACTIVITY", "TRAVEL", "FREE_TIME",
     "RETURN_PREP", "RETURN_HUB", "RETURN_TRANSPORT", "RETURN_ACCESS", "RETURN_DONE",
     "OUTBOUND",
 ]
@@ -42,6 +42,17 @@ class MapMarker(BaseModel):
     longitude: float
     sequence: int | None = None  # Activity visit order; hubs/lodging may be None
     is_main: bool = False
+
+
+class PathPoint(BaseModel):
+    """Ordered day itinerary point for PathLayer — never deduped with Marker merge."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    role: Literal["START", "ACTIVITY", "END", "RETURN_HUB"]
+    place_id: str
+    name: str
+    latitude: float
+    longitude: float
+    sequence: int | None = None
 
 
 class TimelineEvent(BaseModel):
@@ -79,7 +90,10 @@ class DayView(BaseModel):
     summary: DaySummary
     markers: tuple[MapMarker, ...] = ()
     timeline: tuple[TimelineEvent, ...] = ()
-    order_line: tuple[tuple[float, float], ...] = ()  # lat/lon visit-order guide (not real geometry)
+    # Full day point sequence for visit-order guide (START → activities → END/RETURN_HUB).
+    # Independent from Marker dedup — same coordinates may appear twice (start and end).
+    path_sequence: tuple[PathPoint, ...] = ()
+    order_line: tuple[tuple[float, float], ...] = ()  # lat/lon derived from path_sequence
     missing_coord_names: tuple[str, ...] = ()
     return_summary: ReturnViewSummary | None = None
     lodging_label: str = ""  # "숙소" or "임시 기준점"
@@ -160,24 +174,57 @@ def _travel_label(item: ScheduleItem) -> str:
 
 
 def _activity_detail(item: ScheduleItem) -> str:
-    bits = []
+    """Normalize meal/category labels — never repeat 점심/저녁 twice."""
+    bits: list[str] = []
+    meal_label = ""
     if item.meal_slot and ":" in item.meal_slot:
-        bits.append(item.meal_slot.split(":", 1)[1])  # 점심 / 저녁
+        meal_label = item.meal_slot.split(":", 1)[1].strip()
     elif item.meal_slot:
-        bits.append(item.meal_slot)
-    category = simplify_category(item.reason.split(" · ")[0] if " · " in item.reason else "")
-    # reason often: "점심 · 음식점 > … · 맛집 성향 후보" or "category · preference"
-    if not category and item.reason:
-        first = item.reason.split(" · ")[0]
-        if first not in {"점심", "저녁"}:
-            category = simplify_category(first)
-    if category:
+        meal_label = item.meal_slot.strip()
+    if meal_label in {"점심", "저녁"}:
+        bits.append(meal_label)
+
+    reason_parts = [p.strip() for p in (item.reason or "").split(" · ") if p.strip()]
+    category = ""
+    for part in reason_parts:
+        if part in {"점심", "저녁"}:
+            continue  # already covered by meal_slot
+        simplified = simplify_category(part)
+        if simplified and simplified not in bits:
+            category = simplified
+            break
+    if category and category not in bits:
         bits.append(category)
-    elif item.preference:
+    elif not category and item.preference and item.preference not in bits:
         bits.append(item.preference)
+
     minutes = int(round(item.duration_minutes))
     bits.append(f"체류 {minutes}분")
-    return " · ".join(bits)
+    # Dedup consecutive identical tokens (방어: 점심 · 점심).
+    normalized: list[str] = []
+    for bit in bits:
+        if not normalized or normalized[-1] != bit:
+            normalized.append(bit)
+    return " · ".join(normalized)
+
+
+def _first_item_start(items: tuple[ScheduleItem, ...] | list[ScheduleItem]):
+    return items[0].start_datetime if items else None
+
+
+def _free_time_detail(*, at_lodging: bool, provisional: bool) -> str:
+    if at_lodging:
+        place = "임시 기준점" if provisional else "숙소"
+        return f"{place}에서 자유시간 · 휴식/출발 준비"
+    return "휴식, 주변 산책 또는 다음 일정 이동에 사용할 수 있는 시간"
+
+
+def _append_path(path: list[PathPoint], *, role: Literal["START", "ACTIVITY", "END", "RETURN_HUB"],
+                 point: AccessPoint, sequence: int | None = None) -> None:
+    """Append to path sequence without coordinate/id dedup (start≠end even if same place)."""
+    path.append(PathPoint(
+        role=role, place_id=point.id, name=point.name,
+        latitude=point.y, longitude=point.x, sequence=sequence))
 
 
 def _add_marker(markers: dict[str, MapMarker], *, role: MarkerRole, point: AccessPoint,
@@ -241,7 +288,7 @@ def build_day_view(
     markers: dict[str, MapMarker] = {}
     timeline: list[TimelineEvent] = []
     missing: list[str] = []
-    order_line: list[tuple[float, float]] = []
+    path_sequence: list[PathPoint] = []
     activity_seq = 0
 
     if day is None:
@@ -266,6 +313,9 @@ def build_day_view(
 
     overnight_start = lodging_point_for_day(schedule, day, boundary="start") if day else None
     overnight_end = lodging_point_for_day(schedule, day, boundary="end") if day else None
+    first_start = _first_item_start(items)
+    # True until the day's first schedule item begins — gap is still at lodging/base.
+    awaiting_first_departure = role in {"MIDDLE", "FINAL"}
 
     # --- Outbound + day open ---
     if role in {"FIRST", "SINGLE"}:
@@ -276,16 +326,33 @@ def build_day_view(
             detail="DAY 일정 시작" if role == "FIRST" else "일정 시작",
             place_id=start_point.id))
         _add_marker(markers, role="ARRIVAL_HUB", point=start_point)
+        _append_path(path_sequence, role="START", point=start_point)
     else:
         base = overnight_start or start_point
-        title = f"{base.name} 출발" if status != "PROVISIONAL" else f"{base.name} 임시 기준점 출발"
-        timeline.append(TimelineEvent(
-            kind="DEPARTURE", start=activity_start, end=None,
-            title=title, detail=label + " 출발", place_id=base.id))
         _add_marker(
             markers,
             role="PROVISIONAL" if status == "PROVISIONAL" else "ACCOMMODATION",
             point=base)
+        _append_path(path_sequence, role="START", point=base)
+        # DAY_START ≠ DEPARTURE: only emit 출발 when first item starts at day_start.
+        departs_immediately = (
+            first_start is not None and first_start == activity_start
+            and items and items[0].item_type == "TRAVEL")
+        if departs_immediately:
+            title = (f"{base.name} 임시 기준점 출발" if status == "PROVISIONAL"
+                     else f"{base.name} 출발")
+            timeline.append(TimelineEvent(
+                kind="DEPARTURE", start=activity_start, end=None,
+                title=title, detail=label + " 출발", place_id=base.id))
+            awaiting_first_departure = False
+        else:
+            location = (f"임시 기준점 {base.name}" if status == "PROVISIONAL"
+                        else base.name)
+            timeline.append(TimelineEvent(
+                kind="DAY_START", start=activity_start, end=None,
+                title=f"{day_index}일차 일정 시작",
+                detail=f"현재 위치 · {location}",
+                place_id=base.id))
 
     previous = activity_start
     for index, item in enumerate(items):
@@ -294,7 +361,9 @@ def build_day_view(
             timeline.append(TimelineEvent(
                 kind="FREE_TIME", start=previous, end=item.start_datetime,
                 title=f"자유시간 · {int(round(gap))}분",
-                detail="휴식, 주변 산책 또는 다음 일정 이동에 사용할 수 있는 시간"))
+                detail=_free_time_detail(
+                    at_lodging=awaiting_first_departure,
+                    provisional=status == "PROVISIONAL")))
         if item.item_type == "TRAVEL":
             origin_name = item.origin.name if item.origin else ""
             dest_name = item.destination.name if item.destination else item.place_name
@@ -303,7 +372,9 @@ def build_day_view(
                 title=f"{origin_name} → {dest_name}",
                 detail=f"{_travel_label(item)} · 약 {int(round(item.duration_minutes))}분",
                 place_id=item.place_id))
+            awaiting_first_departure = False
         else:
+            awaiting_first_departure = False
             activity_seq += 1
             is_main = bool(preferred and item.place_id == preferred)
             title = f"★ {item.place_name}" if is_main else item.place_name
@@ -335,7 +406,7 @@ def build_day_view(
                     markers,
                     role="MAIN" if is_main else "ACTIVITY",
                     point=point, sequence=activity_seq, is_main=is_main)
-                order_line.append(latlon)
+                _append_path(path_sequence, role="ACTIVITY", point=point, sequence=activity_seq)
         previous = item.end_datetime
 
     # --- Day close / lodging / return ---
@@ -355,6 +426,7 @@ def build_day_view(
                 markers,
                 role="PROVISIONAL" if status == "PROVISIONAL" else "ACCOMMODATION",
                 point=lodge)
+            _append_path(path_sequence, role="END", point=lodge)
     elif role == "FINAL" or (role == "SINGLE" and schedule.return_journey):
         timeline.append(TimelineEvent(
             kind="RETURN_PREP", start=previous, end=None,
@@ -370,10 +442,10 @@ def build_day_view(
                 kind="RETURN_PREP", start=hub_leg.arrival_time, end=None,
                 title=f"{hub_leg.destination} 도착",
                 detail=f"승차 준비 {int(round(journey.boarding_buffer_minutes))}분"))
-            # Return hub marker from destination_point when present.
             hub_point = hub_leg.destination_point
             if hub_point is not None:
                 _add_marker(markers, role="RETURN_HUB", point=hub_point)
+                _append_path(path_sequence, role="RETURN_HUB", point=hub_point)
             transport = journey.transport
             t_label = TRAVEL_MODE_LABELS.get(
                 transport.transport_type.value, transport.transport_type.value)
@@ -403,6 +475,15 @@ def build_day_view(
             return_summary = ReturnViewSummary(
                 goal=schedule.trip_end_datetime, expected=None, margin_minutes=None,
                 cutoff=schedule.destination_activity_cutoff)
+    elif role == "SINGLE":
+        lodge = overnight_end or schedule.accommodation
+        if lodge is not None:
+            lodging_name = lodge.name
+            _add_marker(
+                markers,
+                role="PROVISIONAL" if status == "PROVISIONAL" else "ACCOMMODATION",
+                point=lodge)
+            _append_path(path_sequence, role="END", point=lodge)
 
     # Summary lines from existing times only.
     visits = sum(1 for i in items if i.item_type != "TRAVEL")
@@ -431,12 +512,14 @@ def build_day_view(
             else:
                 summary_lines.append(f"숙소: {lodge.name}" if role == "FIRST" else "숙소 복귀")
 
+    order_line = tuple((p.latitude, p.longitude) for p in path_sequence)
     return DayView(
         day_index=day_index, date=day_date, role=role,
         summary=DaySummary(lines=tuple(summary_lines)),
         markers=tuple(markers.values()),
         timeline=tuple(timeline),
-        order_line=tuple(order_line),
+        path_sequence=tuple(path_sequence),
+        order_line=order_line,
         missing_coord_names=tuple(dict.fromkeys(missing)),
         return_summary=return_summary,
         lodging_label=label,

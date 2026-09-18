@@ -212,6 +212,67 @@ def test_case13_order_line_not_geometry_claim(selected):
     assert deck is not None
 
 
+def test_path_sequence_day1_hub_to_activity_and_back(selected):
+    """CASE A/B/E/F — DAY1 START→① and last→END even when Start/End share coords."""
+    schedule = multiday_schedule(provisional=True)
+    view = build_schedule_views(schedule, selected=selected)[0]
+    roles = [p.role for p in view.path_sequence]
+    assert roles[0] == "START"
+    assert roles[-1] == "END"
+    assert "ACTIVITY" in roles
+    # Hub → Activity 1 segment
+    assert view.path_sequence[0].place_id == "hub"
+    assert view.path_sequence[1].role == "ACTIVITY"
+    assert view.path_sequence[1].sequence == 1
+    # Last activity → provisional end
+    assert view.path_sequence[-2].role == "ACTIVITY"
+    assert view.path_sequence[-1].place_id == "hub"
+    # Same place_id may appear twice in path; marker list still deduped.
+    hub_in_path = sum(1 for p in view.path_sequence if p.place_id == "hub")
+    assert hub_in_path == 2
+    hub_markers = [m for m in view.markers if m.place_id == "hub"]
+    assert len(hub_markers) == 1
+    assert len(view.order_line) == len(view.path_sequence)
+
+
+def test_path_sequence_middle_day_lodge_bookends(selected):
+    """CASE C/D — Middle Day lodge → activities → lodge."""
+    view = build_schedule_views(multiday_schedule(), selected=selected)[1]
+    assert view.path_sequence[0].role == "START"
+    assert view.path_sequence[-1].role == "END"
+    assert view.path_sequence[1].role == "ACTIVITY"
+    assert view.path_sequence[1].sequence == 1
+    assert view.path_sequence[-2].role == "ACTIVITY"
+
+
+def test_path_sequence_final_to_return_hub(selected):
+    """CASE G — Final Day ends at Return Hub on destination map."""
+    view = build_schedule_views(multiday_schedule(), selected=selected)[2]
+    assert view.path_sequence[0].role == "START"
+    assert view.path_sequence[-1].role == "RETURN_HUB"
+    assert any(p.role == "ACTIVITY" for p in view.path_sequence)
+
+
+def test_main_marker_label_rows(selected):
+    view = build_schedule_views(multiday_schedule(), selected=selected)[0]
+    from services.schedule_map import _marker_rows, build_day_deck
+    rows = _marker_rows(view.markers)
+    main = next(r for r in rows if r["role"] == "MAIN")
+    assert main["text"] == "3 MAIN"
+    assert "★" not in main["text"]
+    assert {r["text"] for r in rows if r["text"] in {"1", "2", "3 MAIN", "4"}} >= {"1", "2", "4"}
+    # Hub/lodging use letter codes — never activity numbers.
+    assert next(r["text"] for r in rows if r["role"] == "ARRIVAL_HUB") == "H"
+    assert next(r["text"] for r in rows if r["role"] == "ACCOMMODATION") == "S"
+    deck = build_day_deck(view)
+    text_layers = [layer for layer in deck.layers if getattr(layer, "type", "") == "TextLayer"
+                   or layer.__dict__.get("@@type") == "TextLayer"]
+    assert text_layers
+    size_units = text_layers[0].__dict__.get("size_units")
+    assert str(size_units) == "pixels"
+    assert text_layers[0].__dict__.get("get_size") >= 14
+
+
 def test_case14_15_free_time_and_outbound(selected):
     schedule = multiday_schedule()
     # Inject a gap on day 2
@@ -229,8 +290,61 @@ def test_case14_15_free_time_and_outbound(selected):
     schedule = schedule.model_copy(update={
         "days": (schedule.days[0], day2, schedule.days[2])})
     views = build_schedule_views(schedule, selected=selected)
-    assert any(e.kind == "FREE_TIME" and "자유시간" in e.title for e in views[1].timeline)
+    mid = views[1].timeline
+    assert mid[0].kind == "DAY_START"
+    assert "출발" not in mid[0].title
+    assert any(e.kind == "FREE_TIME" and "자유시간" in e.title for e in mid)
+    free = next(e for e in mid if e.kind == "FREE_TIME")
+    assert "숙소에서 자유시간" in free.detail or "휴식/출발 준비" in free.detail
+    assert not any(e.kind == "DEPARTURE" for e in mid)
     assert any(e.kind == "OUTBOUND" for e in views[0].timeline)
+
+
+def test_day_start_equals_first_travel_emits_departure(selected):
+    """CASE 3 — first travel at day_start → 숙소 출발, no DAY_START duplicate."""
+    view = build_schedule_views(multiday_schedule(), selected=selected)[1]
+    assert view.timeline[0].kind == "DEPARTURE"
+    assert not any(e.kind == "DAY_START" for e in view.timeline)
+
+
+def test_provisional_day_start_location_label(selected):
+    """CASE 4 — provisional uses 임시 기준점 wording on DAY_START."""
+    schedule = multiday_schedule(provisional=True)
+    day2 = schedule.days[1]
+    items = list(day2.items)
+    # Force delayed first travel from hub.
+    delayed = day2.activity_start + timedelta(minutes=76)
+    items[0] = items[0].model_copy(update={
+        "start_datetime": delayed,
+        "end_datetime": delayed + timedelta(minutes=20),
+        "origin": schedule.accommodation,
+    })
+    day2 = day2.model_copy(update={"items": tuple(items)})
+    schedule = schedule.model_copy(update={"days": (schedule.days[0], day2, schedule.days[2])})
+    view = build_schedule_views(schedule, selected=selected)[1]
+    assert view.timeline[0].kind == "DAY_START"
+    assert "임시 기준점" in view.timeline[0].detail
+    free = next(e for e in view.timeline if e.kind == "FREE_TIME")
+    assert "임시 기준점" in free.detail
+
+
+def test_meal_label_not_duplicated():
+    """CASE 5/6 — 점심/저녁 appear once in activity detail."""
+    from services.schedule_day_view import _activity_detail
+    start = datetime(2026, 9, 18, 12, 0, tzinfo=KST)
+    lunch = _visit("m1", "식당", start, start + timedelta(minutes=60), meal="점심")
+    lunch = lunch.model_copy(update={
+        "reason": "점심 · 음식점 > 한식 · 맛집 성향 후보",
+        "meal_slot": f"{start.date()}:점심",
+    })
+    detail = _activity_detail(lunch)
+    assert detail.count("점심") == 1
+    assert "체류 60분" in detail
+    dinner = lunch.model_copy(update={
+        "meal_slot": f"{start.date()}:저녁",
+        "reason": "저녁 · 음식점 > 한식 · 맛집 성향 후보",
+    })
+    assert _activity_detail(dinner).count("저녁") == 1
 
 
 def test_case17_return_margin(selected):

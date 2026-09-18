@@ -34,7 +34,8 @@ def render_day_map(view: DayView, *, key: str) -> None:
         if view.missing_coord_names:
             st.caption("일부 장소는 지도 위치 정보를 표시하지 못했습니다.")
         legend = (
-            "● 활동  ·  ★/주황 MAIN  ·  숙=숙소  ·  임=임시 기준점  ·  도=도착 거점"
+            "숫자=방문 순서(Timeline과 동일)  ·  N MAIN=선택 MAIN  ·  "
+            "H=도착 거점  ·  S=숙소  ·  P=임시 기준점  ·  R=귀가 거점  ·  선=방문 순서 안내선"
         )
         st.caption(legend)
     except Exception:
