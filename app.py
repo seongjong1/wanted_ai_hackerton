@@ -11,7 +11,7 @@ from config import Settings, load_settings
 from models.trip_request import Preference, RADIUS_OPTIONS, TripRequest
 from services.health_service import check_connections
 from services.transport_service import search_transport
-from models.access import is_estimated_access
+from models.access import access_hub_label, is_estimated_access, is_trivial_same_place_access
 from models.transport import TransportCandidate, TransportType
 from services.place_service import search_places_for_trip, place_reason, activity_radius_meters
 
@@ -318,21 +318,26 @@ def render_candidate(candidate: TransportCandidate, number: int, *, selectable: 
             modes = {"BUS": "버스", "SUBWAY": "지하철", "WALKING": "도보",
                      "SAME_PLACE": "같은 장소", "ESTIMATED": "추정"}
             estimated_access = is_estimated_access(leg)
-            if estimated_access:
+            trivial_access = is_trivial_same_place_access(leg)
+            if trivial_access:
+                hub = access_hub_label(leg) or candidate.departure_place
+                st.write(f"접근 이동 없음 · {hub}에서 바로 출발")
+            elif estimated_access:
                 st.write(f"접근 이동(추정): {leg.origin} → {leg.destination} · {format_minutes(leg.duration_minutes)}")
                 st.caption("실제 대중교통 경로가 아닙니다. 경로 API를 확인하지 못해 직선거리 기반 추정 시간을 사용합니다.")
             else:
                 st.write(f"접근 이동: {leg.origin} → {leg.destination} · {format_minutes(leg.duration_minutes)}")
                 st.caption(" + ".join(modes.get(mode, mode) for mode in getattr(leg, "transport_modes", ()))
                            + f" · 환승 {getattr(leg, 'transfers', 0)}회")
-            st.write(f"출발 가능 {leg.departure_time:%H:%M} → 거점 도착 {leg.arrival_time:%H:%M:%S}"
-                     f" → 승차 준비 완료 {boarding.ready_time:%H:%M:%S}")
+            if not trivial_access:
+                st.write(f"출발 가능 {leg.departure_time:%H:%M} → 거점 도착 {leg.arrival_time:%H:%M:%S}"
+                         f" → 승차 준비 완료 {boarding.ready_time:%H:%M:%S}")
             st.write(f"승차 버퍼 {format_minutes(boarding.buffer_minutes)} · 추가 대기 {format_minutes(boarding.waiting_minutes)}"
                      f" · 총 소요시간 {format_minutes(boarding.total_duration_minutes)}")
             steps = [step for step in getattr(leg, "steps", ()) if getattr(step, "mode", "").strip() and
                      (getattr(step, "duration_seconds", 0) > 0 or getattr(step, "distance_meters", 0) > 0
                       or getattr(step, "guidance", "").strip())]
-            if steps and not estimated_access:
+            if steps and not estimated_access and not trivial_access:
                 with st.expander("접근 경로 자세히 보기", expanded=False):
                     for step in steps:
                         st.text(f"{modes.get(step.mode, step.mode)} · {format_minutes(step.duration_seconds / 60)}"
@@ -1067,11 +1072,11 @@ def render_replan_panel(schedule, *, trip, selected, lodging_key, preferred, com
     user_text = st.text_area(
         "현재 상황이나 바꾸고 싶은 내용을 입력하세요.",
         value=st.session_state.get("replan_user_text") or "",
-        placeholder="예: 여기 문 닫았어 / 시장은 빼줘 / 30분 늦었어 / 너무 피곤해 / 지금 구미역이야",
+        placeholder="예: 여기 문 닫았어 · 시장은 빼줘 · 30분 늦었어 · 너무 피곤해",
         key="replan_input_area",
         height=80,
     )
-    st.caption("예: 여기 문 닫았어 · 시장은 빼줘 · 30분 늦었어 · 너무 피곤해 · 지금 구미역이야")
+    st.caption("예: 여기 문 닫았어 · 시장은 빼줘 · 30분 늦었어 · 너무 피곤해")
 
     if st.button("일정 다시 계산", key="replan_compute", type="primary"):
         text = (user_text or "").strip()
@@ -1250,9 +1255,9 @@ def render_diagnostics(settings: Settings) -> None:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
-    st.set_page_config(page_title="AI 여행 플래너", page_icon="🧳", layout="centered")
-    st.title("AI 여행 플래너")
-    st.caption("Phase 5 · 날짜별 지도와 타임라인으로 여행 일정을 보여줍니다.")
+    st.set_page_config(page_title="여행 다시짜기", page_icon="🧳", layout="centered")
+    st.title("여행 다시짜기")
+    st.caption("출발부터 귀가까지, 상황이 바뀌면 남은 일정만 다시 계산합니다.")
     settings = read_settings()
     render_trip_form()
     render_diagnostics(settings)

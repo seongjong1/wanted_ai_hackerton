@@ -13,8 +13,8 @@ from models.schedule import (
 from models.transport import KST, TransportType
 from models.trip_request import Preference
 from services.schedule_day_view import (
-    build_day_view, build_schedule_views, lodging_point_for_day, lodging_ui_label,
-    simplify_category, collect_coordinates)
+    build_day_view, build_outbound_timeline, build_schedule_views,
+    lodging_point_for_day, lodging_ui_label, simplify_category, collect_coordinates)
 from services.schedule_map import build_day_deck
 from test_places import trip, selected, anchor
 from test_multiday_schedule import lodging
@@ -459,3 +459,117 @@ def test_arrival_case5_map_return_replan_regression(selected):
     from services.schedule_map import build_day_deck
     deck = build_day_deck(views[0])
     assert hasattr(deck, "layers") or deck is not None
+
+
+def _station_point():
+    return AccessPoint(id="seoul-station", name="서울역", x=126.97, y=37.55)
+
+
+def _outbound_with_access(leg, *, dep_place="서울", arr_place="마산",
+                          dep="20260918100700", arr="20260918131700"):
+    from models.access import BoardingAssessment
+    from services.transport_service import convert_candidate
+    base = convert_candidate(
+        {"depplacename": dep_place, "arrplacename": arr_place,
+         "depplandtime": dep, "arrplandtime": arr},
+        TransportType.TRAIN)
+    boarding = BoardingAssessment(leg, 15, base.departure_time, base.arrival_time)
+    return base.model_copy(update={
+        "access": boarding,
+        "departure_place": dep_place,
+        "arrival_place": arr_place,
+    })
+
+
+def test_zero_access_case1_same_station_travel_hidden():
+    """CASE 1 — 서울역 → 서울역 0분: Timeline travel card hidden."""
+    station = _station_point()
+    leg = AccessLeg(
+        origin="서울역", destination="서울역", transport_modes=("SAME_PLACE",),
+        duration_minutes=0, distance_meters=0,
+        departure_time=datetime(2026, 9, 18, 9, 0, tzinfo=KST),
+        provider="Kakao Local · same place ID",
+        origin_point=station, destination_point=station)
+    selected = _outbound_with_access(leg)
+    events = build_outbound_timeline(selected)
+    titles = [e.title for e in events]
+    details = [e.detail for e in events]
+    assert "서울역 → 서울역" not in titles
+    assert not any("출발지 접근" in d for d in details)
+    assert not any(e.kind == "OUTBOUND" and e.start == e.end for e in events)
+    ready = next(e for e in events if e.kind == "DEPARTURE")
+    assert ready.title == "서울역 출발 준비"
+    assert ready.end is None
+    assert ready.detail == "접근 이동 없음"
+    long_haul = next(e for e in events if e.kind == "OUTBOUND")
+    assert long_haul.title == "서울 → 마산"
+    assert "열차" in long_haul.detail and "190분" in long_haul.detail
+
+
+def test_zero_access_case2_local_origin_same_place_hidden():
+    """CASE 2 — typed 서울, resolved hub 서울역, same_place=True."""
+    station = _station_point()
+    leg = AccessLeg(
+        origin="서울", destination="서울역", transport_modes=("SAME_PLACE",),
+        duration_minutes=0, distance_meters=0,
+        departure_time=datetime(2026, 9, 18, 9, 0, tzinfo=KST),
+        provider="Kakao Local · same place ID",
+        origin_point=station, destination_point=station)
+    events = build_outbound_timeline(_outbound_with_access(leg))
+    titles = [e.title for e in events]
+    assert "서울 → 서울역" not in titles
+    assert "서울역 → 서울역" not in titles
+    assert any(e.kind == "DEPARTURE" and e.title == "서울역 출발 준비" for e in events)
+    assert any(e.kind == "OUTBOUND" and e.title == "서울 → 마산" for e in events)
+
+
+def test_zero_access_case3_real_access_still_shown():
+    """CASE 3 — 금천구 주소 → 서울고속버스터미널 49분: keep access travel."""
+    origin = AccessPoint(id="home", name="서울 금천구 가산로3길 45", x=126.88, y=37.48)
+    hub = AccessPoint(id="express", name="서울고속버스터미널", x=127.0, y=37.5)
+    leg = AccessLeg(
+        origin=origin.name, destination=hub.name, transport_modes=("SUBWAY", "WALKING"),
+        duration_minutes=49, departure_time=datetime(2026, 9, 18, 9, 0, tzinfo=KST),
+        provider="Kakao publictraffic", origin_point=origin, destination_point=hub)
+    selected = _outbound_with_access(
+        leg, dep_place="서울고속버스터미널", arr_place="구미",
+        dep="20260918100000", arr="20260918132500")
+    events = build_outbound_timeline(selected)
+    access = next(e for e in events if e.kind == "OUTBOUND" and "출발지 접근" in e.detail)
+    assert access.title == "서울 금천구 가산로3길 45 → 서울고속버스터미널"
+    assert "49분" in access.detail
+    assert not any(e.kind == "DEPARTURE" for e in events)
+
+
+def test_zero_access_case4_boarding_times_unchanged():
+    """CASE 4 — hiding 0-minute access does not change long-distance start or buffer."""
+    station = _station_point()
+    leg = AccessLeg(
+        origin="서울역", destination="서울역", transport_modes=("SAME_PLACE",),
+        duration_minutes=0, distance_meters=0,
+        departure_time=datetime(2026, 9, 18, 9, 0, tzinfo=KST),
+        provider="test", origin_point=station, destination_point=station)
+    selected = _outbound_with_access(leg)
+    before_dep = selected.departure_time
+    before_ready = selected.access.ready_time
+    before_total = selected.access.total_duration_minutes
+    events = build_outbound_timeline(selected)
+    assert selected.departure_time == before_dep
+    assert selected.access.access_leg.duration_minutes == 0
+    assert selected.access.ready_time == before_ready
+    assert selected.access.total_duration_minutes == before_total
+    assert selected.departure_time == datetime(2026, 9, 18, 10, 7, tzinfo=KST)
+    long_haul = next(e for e in events if e.kind == "OUTBOUND")
+    assert long_haul.start == selected.departure_time
+    assert long_haul.end == selected.arrival_time
+
+
+def test_zero_access_case5_6_schedule_and_phase5_regression(selected):
+    """CASE 5/6 — schedule payload unchanged; Phase 5 timeline still builds."""
+    schedule = multiday_schedule()
+    original_items = tuple(schedule.days[0].items)
+    views = build_schedule_views(schedule, selected=selected)
+    assert schedule.days[0].items == original_items
+    assert len(views) == 3
+    assert any(e.kind == "TRAVEL" for e in views[0].timeline)
+    assert views[2].return_summary is not None

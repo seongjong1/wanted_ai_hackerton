@@ -605,3 +605,21 @@ def test_app_has_replan_panel_and_no_engine_terms():
     # User-facing copy should not expose engine jargon in UI strings
     assert 'st.write("ReplanEvent")' not in src
     assert 'st.subheader("Deterministic' not in src
+
+
+def test_app_user_facing_copy_hides_phase_and_gumi_example():
+    from pathlib import Path
+    src = Path("app.py").read_text(encoding="utf-8")
+    vis = Path("services/schedule_visualization.py").read_text(encoding="utf-8")
+    assert 'page_title="여행 다시짜기"' in src
+    assert 'st.title("여행 다시짜기")' in src
+    assert "출발부터 귀가까지, 상황이 바뀌면 남은 일정만 다시 계산합니다." in src
+    assert 'st.title("AI 여행 플래너")' not in src
+    assert 'page_title="AI 여행 플래너"' not in src
+    assert 'st.caption("Phase 5' not in src
+    assert "지금 구미역이야" not in src
+    assert "여기 문 닫았어 · 시장은 빼줘 · 30분 늦었어 · 너무 피곤해" in src
+    assert 'st.markdown("**귀가 요약**")' in vis
+    assert "목적지 활동 종료 권장 한도" in vis
+    assert "st.success(" not in vis
+    assert "귀가 완료 목표" in src

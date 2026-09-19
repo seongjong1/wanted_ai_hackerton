@@ -10,7 +10,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from models.access import AccessPoint
+from models.access import AccessPoint, access_hub_label, is_trivial_same_place_access
 from models.place import PlaceCandidate
 from models.schedule import ReturnStatus, ScheduleItem, TripDaySchedule, TripSchedule
 from models.transport import TransportCandidate, TransportType
@@ -253,10 +253,18 @@ def build_outbound_timeline(selected: TransportCandidate | None) -> list[Timelin
     access = getattr(selected, "access", None)
     if access is not None and getattr(access, "access_leg", None) is not None:
         leg = access.access_leg
-        events.append(TimelineEvent(
-            kind="OUTBOUND", start=leg.departure_time, end=leg.arrival_time,
-            title=f"{leg.origin} → {leg.destination}",
-            detail=f"출발지 접근 · 약 {int(round(leg.duration_minutes))}분"))
+        if is_trivial_same_place_access(leg):
+            hub = access_hub_label(leg) or (selected.departure_place or "").strip()
+            if hub:
+                events.append(TimelineEvent(
+                    kind="DEPARTURE", start=leg.departure_time, end=None,
+                    title=f"{hub} 출발 준비",
+                    detail="접근 이동 없음"))
+        else:
+            events.append(TimelineEvent(
+                kind="OUTBOUND", start=leg.departure_time, end=leg.arrival_time,
+                title=f"{leg.origin} → {leg.destination}",
+                detail=f"출발지 접근 · 약 {int(round(leg.duration_minutes))}분"))
     transport_label = TRAVEL_MODE_LABELS.get(
         selected.transport_type.value if isinstance(selected.transport_type, TransportType)
         else str(selected.transport_type),

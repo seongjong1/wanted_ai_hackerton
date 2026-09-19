@@ -3,7 +3,10 @@ from datetime import datetime
 import pytest
 from pydantic import ValidationError
 
-from models.access import AccessLeg, BoardingAssessment, is_estimated_access
+from models.access import (
+    AccessLeg, AccessPoint, BoardingAssessment,
+    access_hub_label, is_estimated_access, is_trivial_same_place_access,
+)
 from models.transport import KST
 
 
@@ -74,3 +77,23 @@ def test_is_estimated_access_keeps_legacy_provider_and_mode_markers():
                          provider="ESTIMATED", estimated=False)
     assert explicit.estimated is False
     assert is_estimated_access(explicit) is True
+
+
+def test_trivial_same_place_access_zero_minutes():
+    station = AccessPoint(id="station", name="서울역", x=126.97, y=37.55)
+    same = AccessLeg(
+        origin="서울역", destination="서울역", transport_modes=("SAME_PLACE",),
+        duration_minutes=0, distance_meters=0,
+        departure_time=datetime(2026, 10, 1, 9, tzinfo=KST),
+        provider="Kakao Local · same place ID",
+        origin_point=station, destination_point=station)
+    assert is_trivial_same_place_access(same) is True
+    assert access_hub_label(same) == "서울역"
+    real = leg(49)
+    assert is_trivial_same_place_access(real) is False
+    mismatched_zero = AccessLeg(
+        origin="서울", destination="서울역", transport_modes=("SAME_PLACE",),
+        duration_minutes=0, departure_time=datetime(2026, 10, 1, 9, tzinfo=KST),
+        provider="test", origin_point=station, destination_point=station)
+    assert is_trivial_same_place_access(mismatched_zero) is True
+    assert access_hub_label(mismatched_zero) == "서울역"

@@ -13,10 +13,6 @@ from services.schedule_day_view import DayView, build_schedule_views, lodging_ui
 from services.schedule_map import build_day_deck
 
 
-def format_minutes(value: float) -> str:
-    return f"{value:g}분" if float(value).is_integer() else f"약 {int(value + 0.5)}분"
-
-
 def render_day_summary(view: DayView) -> None:
     st.markdown(f"**{view.date:%m/%d} · {view.day_index}일차**")
     for line in view.summary.lines:
@@ -90,17 +86,9 @@ def render_day_timeline(
             st.write(event.title)
             if event.detail:
                 st.caption(event.detail)
-    if view.return_summary and view.return_summary.goal is not None:
+    if view.return_summary is not None and view.return_summary.cutoff is not None:
         st.markdown("**귀가 요약**")
-        rs = view.return_summary
-        if rs.cutoff is not None:
-            st.caption(f"목적지 활동 종료 권장 한도: {rs.cutoff:%H:%M}")
-        if rs.expected is not None and rs.margin_minutes is not None:
-            st.success(
-                f"귀가 완료 목표 {rs.goal:%H:%M} · 예상 귀가 {rs.expected:%H:%M} · "
-                f"남은 여유 {format_minutes(rs.margin_minutes)}")
-        else:
-            st.caption(f"귀가 완료 목표 {rs.goal:%H:%M}")
+        st.caption(f"목적지 활동 종료 권장 한도: {view.return_summary.cutoff:%H:%M}")
 
 
 def render_schedule_visualization(

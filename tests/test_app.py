@@ -154,3 +154,23 @@ def test_render_candidate_provider_estimated_without_flag_still_shows_estimate(m
     visible = "\n".join(item.value for elements in (app.markdown, app.caption) for item in elements)
     assert "접근 이동(추정)" in visible
     assert "실제 대중교통 경로가 아닙니다" in visible
+
+
+def test_render_candidate_hides_same_place_zero_access(monkeypatch):
+    from datetime import datetime
+    from models.access import AccessLeg, AccessPoint
+    from models.transport import KST
+    station = AccessPoint(id="station", name="서울역", x=126.97, y=37.55)
+    leg = AccessLeg(
+        origin="서울역", destination="서울역", transport_modes=("SAME_PLACE",),
+        duration_minutes=0, distance_meters=0,
+        departure_time=datetime(2026, 10, 1, 9, tzinfo=KST),
+        provider="Kakao Local · same place ID",
+        origin_point=station, destination_point=station)
+    app, _ = _render_access_app(monkeypatch, leg)
+    assert not app.exception
+    visible = "\n".join(item.value for elements in (app.markdown, app.caption) for item in elements)
+    assert "접근 이동 없음 · 서울역에서 바로 출발" in visible
+    assert "접근 이동: 서울역 → 서울역" not in visible
+    assert "서울역 → 서울역 · 0분" not in visible
+
