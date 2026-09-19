@@ -10,7 +10,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from models.access import AccessPoint, AccessStep, is_estimated_access
+from models.access import AccessPoint, AccessStep
 from models.place import PlaceCandidate
 from models.schedule import ReturnStatus, ScheduleItem, TripDaySchedule, TripSchedule
 from models.transport import TransportCandidate, TransportType
@@ -264,7 +264,7 @@ def build_outbound_timeline(selected: TransportCandidate | None) -> list[Timelin
                     title=f"{hub} 출발 준비",
                     detail="접근 이동 없음"))
         else:
-            steps = () if is_estimated_access(leg) else tuple(getattr(leg, "steps", ()) or ())
+            steps = tuple(getattr(leg, "steps", ()) or ())
             events.append(TimelineEvent(
                 kind="OUTBOUND", start=leg.departure_time, end=leg.arrival_time,
                 title=f"{leg.origin} → {leg.destination}",
@@ -559,7 +559,7 @@ def build_day_view(
         journey = schedule.return_journey
         if journey is not None:
             hub_leg = journey.to_hub
-            hub_steps = () if is_estimated_access(hub_leg) else tuple(getattr(hub_leg, "steps", ()) or ())
+            hub_steps = tuple(getattr(hub_leg, "steps", ()) or ())
             timeline.append(TimelineEvent(
                 kind="RETURN_HUB", start=hub_leg.departure_time, end=hub_leg.arrival_time,
                 title=f"{hub_leg.origin} → {hub_leg.destination}",
@@ -581,7 +581,7 @@ def build_day_view(
                 title=f"{transport.departure_place} → {transport.arrival_place}",
                 detail=f"{t_label} · 약 {int(round(transport.duration_minutes))}분"))
             home = journey.to_origin
-            home_steps = () if is_estimated_access(home) else tuple(getattr(home, "steps", ()) or ())
+            home_steps = tuple(getattr(home, "steps", ()) or ())
             timeline.append(TimelineEvent(
                 kind="RETURN_ACCESS", start=home.departure_time, end=home.arrival_time,
                 title=f"{home.origin} → {home.destination}",

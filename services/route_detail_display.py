@@ -64,3 +64,45 @@ def route_step_lines(step: AccessStep) -> list[str]:
         if not line_name and not (start or end):
             lines.append(guidance)
     return lines
+
+
+def resolve_timeline_route_steps(
+        event,
+        *,
+        selected=None,
+        items=(),
+        return_journey=None,
+) -> list[AccessStep]:
+    """Prefer event.route_steps, then AccessLeg / ScheduleItem sources.
+
+    Cloud can keep a newer Timeline renderer with an older event payload that
+    omitted route_steps even when Kakao already filled AccessLeg.steps.
+    """
+    found = meaningful_route_steps(getattr(event, "route_steps", ()) or ())
+    if found:
+        return found
+    kind = getattr(event, "kind", "")
+    detail = getattr(event, "detail", "") or ""
+    if kind == "OUTBOUND" and "출발지 접근" in detail:
+        leg = getattr(getattr(selected, "access", None), "access_leg", None)
+        found = meaningful_route_steps(getattr(leg, "steps", ()) or ())
+        if found:
+            return found
+    if kind == "TRAVEL":
+        for item in items or ():
+            if getattr(item, "item_type", "") != "TRAVEL":
+                continue
+            if (getattr(item, "start_datetime", None) == getattr(event, "start", None)
+                    and getattr(item, "end_datetime", None) == getattr(event, "end", None)):
+                found = meaningful_route_steps(getattr(item, "route_steps", ()) or ())
+                if found:
+                    return found
+    if kind == "RETURN_HUB" and return_journey is not None:
+        found = meaningful_route_steps(getattr(return_journey.to_hub, "steps", ()) or ())
+        if found:
+            return found
+    if kind == "RETURN_ACCESS" and return_journey is not None:
+        found = meaningful_route_steps(getattr(return_journey.to_origin, "steps", ()) or ())
+        if found:
+            return found
+    return []

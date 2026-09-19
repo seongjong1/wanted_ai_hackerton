@@ -183,3 +183,52 @@ def test_schedule_service_attaches_route_steps():
     assert travels
     assert travels[0].route_steps
     assert travels[0].travel_duration_minutes == rich.duration_seconds / 60
+
+
+def test_timeline_recovers_steps_from_selected_access_when_event_omits_them():
+    from datetime import datetime
+    from models.access import AccessLeg, BoardingAssessment
+    from models.transport import TransportType
+    from services.transport_service import convert_candidate
+    from services.route_detail_display import resolve_timeline_route_steps
+    from services.schedule_day_view import TimelineEvent
+
+    start = datetime(2026, 10, 1, 9, 0, tzinfo=KST)
+    end = start + timedelta(minutes=49)
+    event = TimelineEvent(
+        kind="OUTBOUND", start=start, end=end,
+        title="서울 금천구 가산로3길 45 → 서울고속버스터미널(경부)",
+        detail="출발지 접근 · 약 49분")
+    assert getattr(event, "route_steps", ()) == ()
+    selected = convert_candidate(
+        {"depPlaceNm": "서울경부", "arrPlaceNm": "구미",
+         "depPlandTime": "202610011025", "arrPlandTime": "202610011325",
+         "charge": "30000"}, TransportType.EXPRESS_BUS)
+    leg = AccessLeg(
+        origin="서울 금천구 가산로3길 45", destination="서울고속버스터미널(경부)",
+        transport_modes=("SUBWAY", "WALKING"), duration_minutes=49,
+        departure_time=start, provider="Kakao publictraffic", steps=_steps())
+    selected = selected.model_copy(update={
+        "access": BoardingAssessment(leg, 15, selected.departure_time, selected.arrival_time)})
+    steps = resolve_timeline_route_steps(event, selected=selected)
+    assert [s.mode for s in steps] == ["WALKING", "BUS", "WALKING"]
+
+
+def test_timeline_recovers_travel_steps_from_schedule_item():
+    from services.route_detail_display import resolve_timeline_route_steps
+    from services.schedule_day_view import TimelineEvent
+
+    origin = AccessPoint(id="a", name="구미종합터미널", x=128.33, y=36.12)
+    dest = AccessPoint(id="b", name="꽃돼지식당 구미본점", x=128.34, y=36.13)
+    start = datetime(2026, 10, 1, 13, 25, tzinfo=KST)
+    item = ScheduleItem(
+        item_type="TRAVEL", place_id="b", place_name=dest.name,
+        start_datetime=start, end_datetime=start + timedelta(minutes=27),
+        origin=origin, destination=dest, travel_mode=("BUS",),
+        travel_duration_minutes=27, route_steps=_steps())
+    event = TimelineEvent(
+        kind="TRAVEL", start=item.start_datetime, end=item.end_datetime,
+        title=f"{origin.name} → {dest.name}",
+        detail="버스 · 약 27분")
+    steps = resolve_timeline_route_steps(event, items=(item,))
+    assert steps and steps[1].line_name == "100번"

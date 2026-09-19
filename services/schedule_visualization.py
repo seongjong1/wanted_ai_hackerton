@@ -45,12 +45,23 @@ def render_day_timeline(
         *,
         completed_keys: frozenset[str] | None = None,
         current_datetime: datetime | None = None,
+        selected: TransportCandidate | None = None,
+        schedule: TripSchedule | None = None,
+        items=(),
 ) -> None:
-    from services.route_detail_display import meaningful_route_steps, route_step_lines
+    from services.route_detail_display import resolve_timeline_route_steps, route_step_lines
 
     st.markdown("**일정 타임라인**")
     done = completed_keys or frozenset()
     divider_drawn = False
+    day_items = items
+    if not day_items and schedule is not None:
+        if schedule.days:
+            match = next((d.items for d in schedule.days if d.day_index == view.day_index), ())
+            day_items = match or schedule.items
+        else:
+            day_items = schedule.items
+    journey = schedule.return_journey if schedule is not None else None
     for event in view.timeline:
         # Optional "current time" divider for activity events
         if (current_datetime is not None and not divider_drawn
@@ -88,7 +99,8 @@ def render_day_timeline(
             st.write(event.title)
             if event.detail:
                 st.caption(event.detail)
-            steps = meaningful_route_steps(getattr(event, "route_steps", ()) or ())
+            steps = resolve_timeline_route_steps(
+                event, selected=selected, items=day_items, return_journey=journey)
             show_detail = bool(steps) and event.kind in {
                 "TRAVEL", "RETURN_HUB", "RETURN_ACCESS"}
             if event.kind == "OUTBOUND" and steps and "출발지 접근" in (event.detail or ""):
@@ -141,7 +153,8 @@ def render_schedule_visualization(
         render_day_summary(view)
         render_day_map(view, key="day_map_single")
         render_day_timeline(
-            view, completed_keys=completed_keys, current_datetime=current_datetime)
+            view, completed_keys=completed_keys, current_datetime=current_datetime,
+            selected=selected, schedule=schedule, items=schedule.items)
         _detail_expander(view, schedule.items, schedule.trip_start_datetime, show_return=True)
         return
 
@@ -151,6 +164,7 @@ def render_schedule_visualization(
             render_day_summary(view)
             render_day_map(view, key=f"day_map_{view.day_index}")
             render_day_timeline(
-                view, completed_keys=completed_keys, current_datetime=current_datetime)
+                view, completed_keys=completed_keys, current_datetime=current_datetime,
+                selected=selected, schedule=schedule, items=day.items)
             _detail_expander(
                 view, day.items, day.activity_start, show_return=(view.role == "FINAL"))
