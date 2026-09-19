@@ -55,6 +55,13 @@ class ScheduleSettings:
     accommodation_route_eval_limit: int = 5
     accommodation_recommend_limit: int = 3
     meal_windows: tuple[tuple[str, int, int], ...] = (("점심", 11, 15), ("저녁", 17, 20))
+    # Phase 6.1 deterministic replan bounds (no LLM loops).
+    max_replan_attempts: int = 3
+    fatigue_max_visits_factor: float = 0.6
+    fatigue_distance_penalty: int = 40
+    # Phase 6.2 NL delay bounds (minutes).
+    replan_delay_min_minutes: int = 1
+    replan_delay_max_minutes: int = 240
 
     def __post_init__(self):
         numbers = (self.meal_minutes, self.sightseeing_minutes, self.shopping_minutes,
@@ -72,9 +79,17 @@ class ScheduleSettings:
                    self.accommodation_return_buffer_minutes,
                    self.accommodation_search_pages, self.accommodation_search_size,
                    self.accommodation_prefilter_limit, self.accommodation_route_eval_limit,
-                   self.accommodation_recommend_limit)
+                   self.accommodation_recommend_limit, self.max_replan_attempts,
+                   self.fatigue_distance_penalty, self.replan_delay_min_minutes,
+                   self.replan_delay_max_minutes)
         if any(v <= 0 for v in numbers) or self.max_schedule_attempts > 3:
             raise ValueError("Invalid schedule limits")
+        if not 1 <= self.max_replan_attempts <= 5:
+            raise ValueError("Invalid max_replan_attempts")
+        if not 0.2 <= self.fatigue_max_visits_factor <= 1.0:
+            raise ValueError("Invalid fatigue_max_visits_factor")
+        if self.replan_delay_min_minutes > self.replan_delay_max_minutes:
+            raise ValueError("Invalid replan delay bounds")
         if not 0 <= self.day_start_hour < self.day_end_hour <= 24 or not 0 <= self.night_start_hour < 24:
             raise ValueError("Invalid schedule hours")
         if not 0 <= self.default_daily_start_hour < self.default_daily_end_hour <= 24:
@@ -103,6 +118,8 @@ class Settings:
     groq_model: str = "openai/gpt-oss-120b"
     enable_api_diagnostics: bool = False
     extended_activity_radius_meters: int = 2000
+    # Living-area / neighborhood destination radius (홍대·성수). Independent of activity_radius.
+    destination_scope_radius_meters: int = 3500
     local_origin_hub_scan_limit: int = 12
     local_origin_hub_limit: int = 3
     schedule: ScheduleSettings = field(default_factory=ScheduleSettings)
@@ -125,6 +142,14 @@ def load_settings(secrets: Mapping[str, object] | None = None,
     except ValueError:
         logging.getLogger("travel_ai.config").warning("Invalid extended radius; defaulting to 2000m")
         extended_radius = 2000
+    try:
+        destination_radius = int(read("DESTINATION_SCOPE_RADIUS_METERS") or "3500")
+        if not 1000 <= destination_radius <= 12000:
+            raise ValueError("out of range")
+    except ValueError:
+        logging.getLogger("travel_ai.config").warning(
+            "Invalid destination scope radius; defaulting to 3500m")
+        destination_radius = 3500
     def limit(name: str, default: int, maximum: int) -> int:
         try:
             value = int(read(name) or str(default))
@@ -141,6 +166,7 @@ def load_settings(secrets: Mapping[str, object] | None = None,
         groq_api_key=read("GROQ_API_KEY"),
         enable_api_diagnostics=read("ENABLE_API_DIAGNOSTICS").lower() in {"true", "1"},
         extended_activity_radius_meters=extended_radius,
+        destination_scope_radius_meters=destination_radius,
         local_origin_hub_scan_limit=limit("LOCAL_ORIGIN_HUB_SCAN_LIMIT", 12, 30),
         local_origin_hub_limit=limit("LOCAL_ORIGIN_HUB_LIMIT", 3, 3),
         schedule=ScheduleSettings(
@@ -163,5 +189,6 @@ def load_settings(secrets: Mapping[str, object] | None = None,
             accommodation_prefilter_limit=limit("ACCOMMODATION_PREFILTER_LIMIT", 5, 15),
             accommodation_route_eval_limit=limit("ACCOMMODATION_ROUTE_EVAL_LIMIT", 5, 10),
             accommodation_recommend_limit=limit("ACCOMMODATION_RECOMMEND_LIMIT", 3, 5),
+            max_replan_attempts=limit("MAX_REPLAN_ATTEMPTS", 3, 5),
         ),
     )

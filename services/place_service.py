@@ -65,10 +65,15 @@ def destination_tokens(value: str) -> tuple[str, ...]:
 
 
 def belongs_to_destination(destination: str, address: str) -> bool:
-    # Only administrative address components, never substring matches in business names.
+    """Legacy exact-token check for raw destination strings.
+
+    Prefer ``matches_resolved_destination`` after DestinationResolver for
+    multi-admin / living-area inputs (마산, 홍대, …).
+    """
     wanted = destination_tokens(destination)
     actual = destination_tokens(" ".join(address.split()[:3]))
     return bool(wanted) and all(token in actual for token in wanted)
+
 
 
 def discovery_score(candidate: PlaceCandidate) -> int:
@@ -187,13 +192,17 @@ def add_ai_reasons(candidates: list[PlaceCandidate], groq: GroqProvider) -> tupl
 
 class PlaceService:
     def __init__(self, kakao: KakaoProvider, *, resolve_point: Callable[[str], AccessPoint], groq: GroqProvider | None = None,
-                 extended_radius: int = 2000, limit: int = 15, pages_per_query: int = 2) -> None:
+                 extended_radius: int = 2000, limit: int = 15, pages_per_query: int = 2,
+                 destination_scope_radius_meters: int = 3500) -> None:
         if not 1 <= limit <= 30 or not 1 <= pages_per_query <= 3:
             raise ValueError("Invalid place search limits")
         self.kakao, self.resolve_point, self.groq = kakao, resolve_point, groq
         self.extended_radius, self.limit, self.pages_per_query = extended_radius, limit, pages_per_query
+        self.destination_scope_radius_meters = destination_scope_radius_meters
 
     def search_main(self, trip: TripRequest, selected_transport: TransportCandidate) -> PlaceResult:
+        from services.destination_resolver import resolve_destination, matches_resolved_destination
+
         result = PlaceResult(destination_scope=trip.destination)
         hub = selected_transport.arrival_place
         hub += ("역" if selected_transport.transport_type == TransportType.TRAIN else "버스터미널") if not (
@@ -203,6 +212,15 @@ class PlaceService:
             result.anchor_candidates = (result.anchor,)
         except ProviderError:
             result.notices.append("도착 거점 좌표 미확인: 메인 장소 검색은 계속합니다.")
+        resolved = resolve_destination(
+            self.kakao, trip.destination, hub=result.anchor,
+            area_radius_m=self.destination_scope_radius_meters)
+        if not resolved.is_resolved:
+            result.status = "후보 없음"
+            result.notices.append(resolved.notice or (
+                "여행지역을 정확히 확인하지 못했습니다. 지역명을 조금 더 구체적으로 입력해주세요."))
+            logger.info("main_places outcome=destination_unresolved status=%s", resolved.status)
+            return result
         found = {}
         failed = invalid = outside = 0
         limited = False
@@ -217,7 +235,14 @@ class PlaceService:
                         break
                     for row in rows:
                         address = row.get("address_name") or row.get("road_address_name") or ""
-                        if not isinstance(address, str) or not belongs_to_destination(trip.destination, address):
+                        try:
+                            lat = float(row.get("y"))
+                            lon = float(row.get("x"))
+                        except (TypeError, ValueError):
+                            lat = lon = None
+                        if (not isinstance(address, str)
+                                or not matches_resolved_destination(
+                                    resolved, address, latitude=lat, longitude=lon)):
                             outside += 1
                             continue
                         try:
@@ -247,10 +272,12 @@ class PlaceService:
         if limited:
             result.notices.append("검색 페이지 상한 내 후보입니다. 지역 전체 장소를 빠짐없이 조회한 결과는 아닙니다.")
         if not result.candidates and outside:
-            result.notices.append("주소로 여행지역을 확인할 수 있는 후보가 없습니다. 시·군·구 이름으로 입력해주세요.")
+            result.notices.append(
+                "여행지역을 정확히 확인하지 못했습니다. 지역명을 조금 더 구체적으로 입력해주세요.")
         if self.groq and result.candidates and result.anchor:
             result.candidates, result.ai_status = add_ai_reasons(result.candidates, self.groq)
-        logger.info("main_places count=%d invalid=%d outside=%d failed=%d", len(result.candidates), invalid, outside, failed)
+        logger.info("main_places count=%d invalid=%d outside=%d failed=%d resolve=%s",
+                    len(result.candidates), invalid, outside, failed, resolved.resolution_type.value)
         return result
 
     def search(self, trip: TripRequest, selected_transport: TransportCandidate,
@@ -342,7 +369,8 @@ def search_places_for_trip(trip: TripRequest, selected_transport: TransportCandi
         resolver = AccessService(kakao, KakaoTransitProvider(settings.kakao_rest_api_key, http))
         groq = GroqProvider(settings.groq_api_key, http, settings.groq_model) if settings.groq_api_key else None
         service = PlaceService(kakao, resolve_point=(lambda query: point) if point else resolver.resolve_point,
-                               groq=groq, extended_radius=settings.extended_activity_radius_meters)
+                               groq=groq, extended_radius=settings.extended_activity_radius_meters,
+                               destination_scope_radius_meters=settings.destination_scope_radius_meters)
         return service.search(trip, selected_transport, anchor_id) if nearby else service.search_main(trip, selected_transport)
     finally:
         http.close()

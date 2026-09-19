@@ -7,7 +7,8 @@ from models.place import PlaceCandidate
 from models.trip_request import Preference, TripRequest
 from providers.http_client import ProviderError
 from services.itinerary_suitability import is_micro_landmark
-from services.place_service import belongs_to_destination, convert_place, discovery_score
+from services.destination_resolver import matches_resolved_destination, resolve_destination
+from services.place_service import convert_place, discovery_score
 
 logger = logging.getLogger("travel_ai.schedule_support")
 
@@ -45,6 +46,8 @@ def search_schedule_support(kakao, trip: TripRequest, anchor, *,
     terms = SUPPORT_SEARCH_TERMS
     if not include_cafe:
         terms = tuple(row for row in terms if row[1] != Preference.REST or "카페" not in row[0])
+    hub = anchor if getattr(anchor, "x", None) is not None and getattr(anchor, "y", None) is not None else None
+    resolved = resolve_destination(kakao, trip.destination, hub=hub)
     for term, preference in terms:
         query = f"{trip.destination} {term}"
         try:
@@ -54,8 +57,20 @@ def search_schedule_support(kakao, trip: TripRequest, anchor, *,
             continue
         for row in rows:
             address = row.get("address_name") or row.get("road_address_name") or ""
-            if not isinstance(address, str) or not belongs_to_destination(trip.destination, address):
+            try:
+                lat = float(row.get("y"))
+                lon = float(row.get("x"))
+            except (TypeError, ValueError):
+                lat = lon = None
+            if not isinstance(address, str):
                 continue
+            if resolved.is_resolved:
+                if not matches_resolved_destination(resolved, address, latitude=lat, longitude=lon):
+                    continue
+            else:
+                from services.place_service import belongs_to_destination
+                if not belongs_to_destination(trip.destination, address):
+                    continue
             try:
                 candidate = convert_place(row, anchor, preference)
             except (ValueError, TypeError):

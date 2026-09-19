@@ -35,8 +35,13 @@ def test_case2_support_search_queries_enrichment_not_food_only(trip, anchor):
         "address_name": "경북 구미시 공원로 1", "category_name": "여행 > 공원",
         "place_url": "https://example.com/p", "distance": "100",
     }]
+    kakao.search_addresses.return_value = [{
+        "address_name": "경북 구미시", "x": "128.33", "y": "36.12",
+        "address": {"address_name": "경북 구미시", "x": "128.33", "y": "36.12"},
+    }]
     found = search_schedule_support(kakao, trip, anchor, include_cafe=True, limit=24)
     queries = [c.args[0] for c in kakao.search_places.call_args_list]
+    assert kakao.search_addresses.called
     assert all(q.startswith(f"{trip.destination} ") for q in queries)
     assert any("관광" in q for q in queries)
     assert any("공원" in q for q in queries)
@@ -179,6 +184,10 @@ def test_case9_no_force_fill_without_good_candidate(trip, selected, anchor):
 def test_case10_micro_landmark_not_promoted_for_gap(trip, selected, anchor):
     """CASE 10: Micro-landmark stays out of PRIMARY 60m sightseeing via gap fill."""
     kakao = Mock()
+    kakao.search_addresses.return_value = [{
+        "address_name": "경북 구미시", "x": "128.33", "y": "36.12",
+        "address": {"address_name": "경북 구미시", "x": "128.33", "y": "36.12"},
+    }]
     kakao.search_places.return_value = [{
         "id": "tower", "place_name": "수출산업의탑", "x": "128.34", "y": "36.13",
         "address_name": "경북 구미시", "category_name": "여행 > 관광명소 > 기념탑",

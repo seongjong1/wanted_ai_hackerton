@@ -26,7 +26,10 @@ def test_food_queries_dedup_cafes_and_scores(trip, selected, anchor, main):
     assert all(c.preference_score < 100 for c in result.candidates)
     assert len(result.candidates[0].matched_queries) == 3
     assert len(result.candidates[1].matched_queries) == 1
-    assert kakao.search_places.call_count == 3
+    # MAIN path: DestinationResolver address + preference queries; nearby keeps radius search only.
+    assert kakao.search_places.call_count == (3 if main else 3)
+    if main:
+        assert kakao.search_addresses.called
     assert all(("radius" not in call.kwargs) if main else call.kwargs["radius"] == 500
                for call in kakao.search_places.call_args_list)
 

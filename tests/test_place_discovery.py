@@ -7,7 +7,15 @@ from test_places import trip, selected, anchor, row, service
 from models.transport import TransportResult
 from models.trip_request import Preference
 from providers.http_client import ProviderError
+from services.destination_resolver import clear_destination_cache
 from services.place_service import PlaceService, belongs_to_destination
+
+
+@pytest.fixture(autouse=True)
+def _clear_destination_cache():
+    clear_destination_cache()
+    yield
+    clear_destination_cache()
 
 
 @pytest.mark.parametrize("radius", ["100m", "500m 이상"])
@@ -19,7 +27,9 @@ def test_main_scope_not_limited_by_activity_radius(trip, selected, anchor, radiu
     assert result.candidates[0].role == "MAIN_DESTINATION"
     assert result.destination_scope == "구미" and result.radius_meters == 0
     assert all("radius" not in call.kwargs and "x" not in call.kwargs for call in kakao.search_places.call_args_list)
-    assert all(call.args[0].startswith("구미 ") for call in kakao.search_places.call_args_list)
+    queries = [call.args[0] for call in kakao.search_places.call_args_list]
+    # Address API resolves 구미; keyword preference queries only.
+    assert all(q.startswith("구미 ") for q in queries)
 
 
 def test_dedup_query_evidence_scoring_and_region(trip, selected, anchor):
@@ -63,6 +73,9 @@ def test_main_continues_without_hub_and_partial_failure(trip, selected):
             raise ProviderError("timeout")
         return [row()]
     kakao.search_places.side_effect = query
+    kakao.search_addresses.return_value = [
+        {"address_name": "경북 구미시", "x": "128.33", "y": "36.12",
+         "address": {"address_name": "경북 구미시", "x": "128.33", "y": "36.12"}}]
     s = PlaceService(kakao, resolve_point=Mock(side_effect=ProviderError("no_data")))
     result = s.search_main(trip, selected)
     assert result.anchor is None and result.candidates

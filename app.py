@@ -59,7 +59,11 @@ def render_trip_form() -> None:
                     "accommodation_query", "accommodation_choice", "accommodation_point",
                     "accommodation_error", "accommodation_resolved_query", "provisional_hub_name",
                     "accommodation_source", "accommodation_recommend_result",
-                    "accommodation_recommend_signature"):
+                    "accommodation_recommend_signature",
+                    "pending_replan", "pending_confirmation", "replan_user_text",
+                    "replan_base_signature", "replan_applied_id", "replan_through_key",
+                    "replan_progress_key", "replan_visit_status",
+                    "replan_current_date", "replan_current_time"):
             st.session_state.pop(key, None)
         try:
             trip = TripRequest(
@@ -91,9 +95,20 @@ def render_trip_form() -> None:
         render_transport_results()
 
 
+def _clear_replan_state() -> None:
+    for key in ("pending_replan", "pending_confirmation", "replan_user_text",
+                "replan_base_signature", "replan_applied_id", "replan_through_key",
+                "replan_progress_key", "replan_visit_status",
+                "replan_progress_select", "replan_visit_status_radio",
+                "replan_through_select", "replan_current_date", "replan_current_time",
+                "replan_confirm_choice"):
+        st.session_state.pop(key, None)
+
+
 def _stale_accommodation_schedule() -> None:
     for key in ("trip_schedule", "schedule_result", "schedule_signature"):
         st.session_state.pop(key, None)
+    _clear_replan_state()
 
 
 def _clear_recommended_accommodation() -> None:
@@ -265,6 +280,7 @@ def render_origin_address_form() -> None:
                 st.session_state.transport_candidates = updated.candidates
                 for key in ("selected_transport", "place_result", "place_candidates", "nearby_result", "trip_schedule", "schedule_result", "origin_address_error"):
                     st.session_state.pop(key, None)
+                _clear_replan_state()
                 st.rerun()
             else:
                 st.session_state.origin_address_error = updated.user_message or "주소를 확인하지 못했습니다. 더 구체적인 주소를 입력해주세요."
@@ -323,6 +339,7 @@ def render_candidate(candidate: TransportCandidate, number: int, *, selectable: 
             st.session_state.selected_transport = candidate
             for key in ("schedule_signature", "nearby_point_choice"):
                 st.session_state.pop(key, None)
+            _clear_replan_state()
             st.rerun()
 
 
@@ -369,6 +386,7 @@ def render_place_results() -> None:
         st.session_state.pop("nearby_result", None)
         st.session_state.pop("trip_schedule", None)
         st.session_state.pop("schedule_result", None)
+        _clear_replan_state()
         st.session_state.place_result = result
         st.session_state.place_candidates = result.candidates
         st.rerun()
@@ -454,6 +472,7 @@ def render_place_cards(result, *, show_all: bool = False, allow_anchor: bool = F
                     st.session_state.schedule_preferred_place_id = candidate.place_id
                     for key in ("trip_schedule", "schedule_result", "schedule_signature", "nearby_result"):
                         st.session_state.pop(key, None)
+                    _clear_replan_state()
                     st.session_state.schedule_anchor_pending = True
                     st.rerun()
 
@@ -463,6 +482,7 @@ def schedule_place_changed() -> None:
     st.session_state.schedule_preferred_place_id = st.session_state.get("nearby_point_choice")
     st.session_state.pop("trip_schedule", None)
     st.session_state.pop("schedule_result", None)
+    _clear_replan_state()
 
 
 def render_schedule_items(items, previous) -> object:
@@ -551,6 +571,7 @@ def render_schedule_results() -> None:
     if st.session_state.get("schedule_signature") != signature:
         st.session_state.pop("trip_schedule", None)
         st.session_state.pop("schedule_result", None)
+        _clear_replan_state()
     st.subheader("추천 여행 일정")
     anchor_name = next((c.place_name for c in candidates if c.place_id == preferred), "자동 추천")
     st.write(f"기준 장소: {anchor_name}")
@@ -614,6 +635,7 @@ def render_schedule_results() -> None:
         st.session_state.schedule_result = result
         st.session_state.schedule_signature = signature
         st.session_state.trip_schedule = result.schedule
+        _clear_replan_state()
     result = st.session_state.get("schedule_result")
     if result is None:
         return
@@ -628,11 +650,533 @@ def render_schedule_results() -> None:
     schedule = st.session_state.get("trip_schedule")
     if schedule is None or schedule.validation_status != "VALIDATED":
         return
+    from services.replan_ui import (
+        resolve_progress_locks, combine_current_datetime, VisitProgressStatus)
+    from models.transport import KST
+    pending = st.session_state.get("pending_replan")
+    if pending and pending.get("completed_keys") is not None:
+        completed_keys = frozenset(pending["completed_keys"])
+    else:
+        progress_key = st.session_state.get("replan_progress_select")
+        if progress_key is None:
+            progress_key = st.session_state.get("replan_progress_key")
+        if progress_key == "":
+            progress_key = None
+        # Migrate legacy through_key once
+        if progress_key is None and st.session_state.get("replan_through_key"):
+            progress_key = st.session_state.get("replan_through_key")
+            st.session_state.replan_visit_status = VisitProgressStatus.COMPLETED.value
+        status = st.session_state.get("replan_visit_status_radio") or st.session_state.get(
+            "replan_visit_status") or VisitProgressStatus.NOT_STARTED.value
+        st.session_state.replan_progress_key = progress_key
+        st.session_state.replan_visit_status = status
+        completed_keys, _ = resolve_progress_locks(
+            schedule, progress_key=progress_key, visit_status=status)
+    cur_date = st.session_state.get("replan_current_date") or schedule.trip_start_datetime.date()
+    cur_time = st.session_state.get("replan_current_time") or schedule.trip_start_datetime.timetz().replace(tzinfo=None)
+    try:
+        current_dt = combine_current_datetime(cur_date, cur_time, KST)
+    except Exception:
+        current_dt = schedule.trip_start_datetime
     from services.schedule_visualization import render_schedule_visualization
     render_schedule_visualization(
         schedule, trip=trip, selected=selected, candidates=candidates,
         render_raw_items=render_schedule_items,
-        render_return=render_return_journey)
+        render_return=render_return_journey,
+        completed_keys=completed_keys,
+        current_datetime=current_dt,
+    )
+    render_replan_panel(
+        schedule, trip=trip, selected=selected, lodging_key=lodging_key,
+        preferred=preferred, completed_keys=completed_keys)
+
+
+def _run_replan_pipeline(
+        *,
+        user_text: str,
+        schedule,
+        trip,
+        selected,
+        completed_keys: frozenset,
+        current_dt,
+        current_place_id: str | None,
+):
+    """Parse (+ optional confirm already done) → engine. Never mutates active schedule."""
+    from providers.http_client import HttpClient
+    from providers.kakao_provider import KakaoProvider
+    from providers.kakao_transit_provider import KakaoTransitProvider
+    from providers.groq_provider import GroqProvider
+    from services.replan_nl_parser import parse_replan_request, apply_parsed_replan
+    from services.replan_ui import (
+        schedule_content_signature, compute_replan_diff, unsupported_user_message)
+
+    settings = read_settings()
+    http = HttpClient(max_attempts=2)
+    resolve_route = None
+    place_pool = ()
+    parse = None
+    applied = None
+    try:
+        kakao = KakaoProvider(settings.kakao_rest_api_key, http) if settings.kakao_rest_api_key else None
+        groq = GroqProvider(settings.groq_api_key, http, model=settings.groq_model) if settings.groq_api_key else None
+        if settings.kakao_rest_api_key:
+            transit = KakaoTransitProvider(settings.kakao_rest_api_key, http)
+
+            def resolve_route(origin, dest):
+                try:
+                    return transit.fastest_route(origin, dest)
+                except Exception:
+                    return None
+
+        main = st.session_state.get("place_result")
+        nearby = st.session_state.get("nearby_result")
+        pool = []
+        if main:
+            pool.extend(main.candidates)
+        if nearby:
+            pool.extend(nearby.candidates)
+        seen = set()
+        uniq = []
+        for c in pool:
+            if c.place_id in seen:
+                continue
+            seen.add(c.place_id)
+            uniq.append(c)
+        place_pool = tuple(uniq)
+
+        parse = parse_replan_request(
+            user_text,
+            schedule=schedule,
+            current_datetime=current_dt,
+            completed_item_ids=completed_keys,
+            current_place_id=current_place_id,
+            settings=settings,
+            groq=groq,
+            kakao=kakao,
+        )
+
+        unsupported = unsupported_user_message(parse)
+        if unsupported and (not parse.events or all(
+                (getattr(i, "event_type", None) == "UNSUPPORTED" or not i.supported)
+                for i in parse.intents)):
+            return {"kind": "unsupported", "message": unsupported, "parse": parse}
+
+        if parse.requires_confirmation and not parse.events:
+            return {"kind": "confirm", "parse": parse}
+
+        applied = apply_parsed_replan(
+            parse, trip=trip, schedule=schedule, selected=selected,
+            current_datetime=current_dt, completed_item_ids=completed_keys,
+            settings=settings, place_pool=place_pool, resolve_route=resolve_route)
+    finally:
+        http.close()
+
+    if parse is None:
+        return {"kind": "failed", "message": "일정을 다시 계산하지 못했습니다. 기존 일정은 그대로 유지됩니다.",
+                "parse": None}
+
+    if applied is None:
+        return {"kind": "failed", "message": "일정을 다시 계산하지 못했습니다. 기존 일정은 그대로 유지됩니다.",
+                "parse": parse}
+
+    if applied.skipped or applied.replan is None:
+        msg = (applied.notices[0] if applied.notices else
+               "일정을 다시 계산하지 못했습니다. 기존 일정은 그대로 유지됩니다.")
+        return {"kind": "failed", "message": msg, "parse": parse, "applied": applied}
+
+    replan = applied.replan
+    from models.replan import ReplanStatus
+    if replan.status in (ReplanStatus.REPLAN_FAILED, ReplanStatus.REPLAN_INFEASIBLE):
+        return {"kind": "preview", "parse": parse, "replan": replan, "applied": applied,
+                "base_signature": schedule_content_signature(schedule)}
+
+    proposed = replan.proposed_schedule or schedule
+    diff = compute_replan_diff(
+        schedule, proposed, completed_ids=completed_keys,
+        events=applied.applied_events or parse.events, replan=replan)
+    return {
+        "kind": "preview",
+        "parse": parse,
+        "replan": replan,
+        "applied": applied,
+        "diff": diff,
+        "base_signature": schedule_content_signature(schedule),
+        "user_text": user_text,
+    }
+
+
+def render_replan_panel(schedule, *, trip, selected, lodging_key, preferred, completed_keys) -> None:
+    """Phase 6.3 — 여행 중 일정 변경 (Preview / Apply / Cancel)."""
+    from models.transport import KST
+    from services.replan_ui import (
+        visit_choices, resolve_progress_locks, combine_current_datetime,
+        inferred_current_place_name, schedule_content_signature,
+        trip_replan_signature, status_user_message, confirmation_candidates,
+        lodging_label, return_preview_lines, finalize_parse_with_place,
+        compute_replan_diff, event_request_lines, diff_kind_label,
+        can_apply_pending, apply_pending_to_active, VisitProgressStatus,
+        progress_time_consistency_warning, find_visit_by_key,
+    )
+    from services.replan_nl_parser import apply_parsed_replan
+
+    st.subheader("여행 중 일정 변경")
+    if schedule is None or schedule.validation_status != "VALIDATED":
+        st.info("먼저 여행 일정을 생성해주세요.")
+        return
+
+    choices = visit_choices(schedule)
+    choice_map = {k: label for k, label in choices}
+    options = [""] + [k for k, _ in choices]
+    progress_key = st.session_state.get("replan_progress_key") or ""
+    if progress_key not in options:
+        progress_key = ""
+    status_value = st.session_state.get("replan_visit_status") or VisitProgressStatus.NOT_STARTED.value
+    pending_freeze = st.session_state.get("pending_replan") is not None
+
+    st.markdown("**현재 진행 상태**")
+    selected_progress = st.selectbox(
+        "기준 장소",
+        options,
+        index=options.index(progress_key) if progress_key in options else 0,
+        format_func=lambda key: "선택 안 함" if not key else choice_map.get(key, key),
+        key="replan_progress_select",
+        disabled=pending_freeze,
+    )
+    status_labels = {
+        VisitProgressStatus.NOT_STARTED.value: "방문 전",
+        VisitProgressStatus.IN_PROGRESS.value: "방문 중",
+        VisitProgressStatus.COMPLETED.value: "방문 완료",
+    }
+    status_options = list(status_labels)
+    status_index = status_options.index(status_value) if status_value in status_options else 0
+    selected_status = st.radio(
+        "이 장소의 상태",
+        status_options,
+        index=status_index,
+        format_func=lambda v: status_labels[v],
+        horizontal=True,
+        key="replan_visit_status_radio",
+        disabled=pending_freeze or not selected_progress,
+    )
+    if pending_freeze:
+        st.caption("변경안 검토 중에는 진행 상태를 바꿀 수 없습니다. 취소 후 다시 지정해주세요.")
+        completed_keys = frozenset(
+            st.session_state.get("pending_replan", {}).get("completed_keys") or completed_keys)
+        current_place_id = st.session_state.get("pending_replan", {}).get("current_place_id")
+    else:
+        st.session_state.replan_progress_key = selected_progress or None
+        st.session_state.replan_visit_status = (
+            selected_status if selected_progress else VisitProgressStatus.NOT_STARTED.value)
+        completed_keys, current_place_id = resolve_progress_locks(
+            schedule,
+            progress_key=st.session_state.replan_progress_key,
+            visit_status=st.session_state.replan_visit_status,
+        )
+        # Keep legacy key cleared so old path cannot re-lock
+        st.session_state.pop("replan_through_key", None)
+
+    if selected_progress and not pending_freeze:
+        visit = find_visit_by_key(schedule, selected_progress)
+        if visit and selected_status == VisitProgressStatus.COMPLETED.value:
+            st.caption(f"마지막으로 완료한 일정: {visit.place_name}까지")
+        elif visit and selected_status == VisitProgressStatus.IN_PROGRESS.value:
+            st.caption(f"현재 방문 중: {visit.place_name} (아직 완료 아님)")
+        elif visit:
+            st.caption(f"다음에 방문할 장소: {visit.place_name} (방문 전)")
+
+    # Current datetime (demo-adjustable; not forced system now)
+    default_date = st.session_state.get("replan_current_date")
+    default_time = st.session_state.get("replan_current_time")
+    if default_date is None:
+        default_date = schedule.trip_start_datetime.date()
+        # Prefer last completed visit end, else trip start
+        if completed_keys:
+            from services.replan_validate import _flat_items
+            from models.replan import item_key
+            for item in _flat_items(schedule):
+                if item_key(item) in completed_keys:
+                    default_date = item.end_datetime.date()
+                    default_time = item.end_datetime.timetz().replace(tzinfo=None)
+        st.session_state.replan_current_date = default_date
+        if default_time is not None:
+            st.session_state.replan_current_time = default_time
+    if st.session_state.get("replan_current_time") is None:
+        st.session_state.replan_current_time = schedule.trip_start_datetime.timetz().replace(tzinfo=None)
+
+    col_d, col_t = st.columns(2)
+    with col_d:
+        cur_date = st.date_input(
+            "설정한 현재 날짜",
+            value=st.session_state.replan_current_date,
+            key="replan_date_input",
+        )
+    with col_t:
+        cur_time = st.time_input(
+            "설정한 현재 시간",
+            value=st.session_state.replan_current_time,
+            key="replan_time_input",
+        )
+    st.session_state.replan_current_date = cur_date
+    st.session_state.replan_current_time = cur_time
+    try:
+        current_dt = combine_current_datetime(cur_date, cur_time, KST)
+    except Exception:
+        current_dt = schedule.trip_start_datetime
+
+    warn = progress_time_consistency_warning(
+        schedule,
+        progress_key=st.session_state.get("replan_progress_key"),
+        visit_status=st.session_state.get("replan_visit_status"),
+        current_datetime=current_dt,
+    )
+    if warn:
+        st.warning(warn)
+
+    # Prefer explicit progress selection for "여기" / location caption
+    if current_place_id:
+        visit = find_visit_by_key(schedule, st.session_state.get("replan_progress_key"))
+        status = st.session_state.get("replan_visit_status")
+        if visit and status == VisitProgressStatus.COMPLETED.value:
+            st.caption(f"현재 위치: 방문 완료로 지정 · {visit.place_name}")
+        elif visit and status == VisitProgressStatus.IN_PROGRESS.value:
+            st.caption(f"현재 위치: 방문 중 · {visit.place_name}")
+        elif visit:
+            st.caption(f"현재 위치: 방문 전(예정) · {visit.place_name}")
+        else:
+            st.caption(f"현재 위치: 일정 기준 추정 · {inferred_current_place_name(schedule, current_dt, completed_keys)}")
+    else:
+        place_name = inferred_current_place_name(schedule, current_dt, completed_keys)
+        st.caption(f"현재 위치: 일정 기준 추정 · {place_name}")
+    st.caption(f"숙소/기준점: {lodging_label(schedule)}")
+
+    # Confirmation flow
+    pending_confirm = st.session_state.get("pending_confirmation")
+    if pending_confirm is not None:
+        parse = pending_confirm.get("parse")
+        st.warning("어떤 장소를 대상으로 할까요?")
+        for notice in (parse.notices if parse else ()):
+            st.caption(notice)
+        cands = confirmation_candidates(parse, schedule)
+        if not cands:
+            st.info("선택할 장소가 없습니다. 요청을 다시 입력해주세요.")
+            if st.button("확인 취소", key="replan_confirm_cancel"):
+                st.session_state.pop("pending_confirmation", None)
+                st.rerun()
+        else:
+            labels = {pid: name for pid, name in cands}
+            pick = st.radio(
+                "장소 선택",
+                list(labels),
+                format_func=lambda pid: labels[pid],
+                key="replan_confirm_choice",
+            )
+            c1, c2 = st.columns(2)
+            if c1.button("이 장소로 일정 다시 계산", key="replan_confirm_ok", type="primary"):
+                finalized = finalize_parse_with_place(parse, pick, occurred_at=current_dt)
+                st.session_state.pop("pending_confirmation", None)
+                with st.spinner("남은 일정을 다시 계산하고 있습니다..."):
+                    applied = apply_parsed_replan(
+                        finalized, trip=trip, schedule=schedule, selected=selected,
+                        current_datetime=current_dt, completed_item_ids=completed_keys,
+                        settings=read_settings())
+                if applied.skipped or applied.replan is None:
+                    st.error(applied.notices[0] if applied.notices else
+                             "일정을 다시 계산하지 못했습니다. 기존 일정은 그대로 유지됩니다.")
+                else:
+                    replan = applied.replan
+                    proposed = replan.proposed_schedule or schedule
+                    diff = compute_replan_diff(
+                        schedule, proposed, completed_ids=completed_keys,
+                        events=applied.applied_events or finalized.events, replan=replan)
+                    import uuid
+                    st.session_state.pending_replan = {
+                        "id": str(uuid.uuid4()),
+                        "user_text": finalized.user_text,
+                        "parse": finalized,
+                        "replan": replan,
+                        "diff": diff,
+                        "completed_keys": list(completed_keys),
+                        "current_place_id": current_place_id,
+                        "base_signature": schedule_content_signature(schedule),
+                        "trip_signature": trip_replan_signature(
+                            trip, selected, preferred_place_id=preferred,
+                            lodging_key=lodging_key, schedule=schedule),
+                    }
+                    st.rerun()
+            if c2.button("취소", key="replan_confirm_abort"):
+                st.session_state.pop("pending_confirmation", None)
+                st.rerun()
+        return
+
+    user_text = st.text_area(
+        "현재 상황이나 바꾸고 싶은 내용을 입력하세요.",
+        value=st.session_state.get("replan_user_text") or "",
+        placeholder="예: 여기 문 닫았어 / 시장은 빼줘 / 30분 늦었어 / 너무 피곤해 / 지금 구미역이야",
+        key="replan_input_area",
+        height=80,
+    )
+    st.caption("예: 여기 문 닫았어 · 시장은 빼줘 · 30분 늦었어 · 너무 피곤해 · 지금 구미역이야")
+
+    if st.button("일정 다시 계산", key="replan_compute", type="primary"):
+        text = (user_text or "").strip()
+        st.session_state.replan_user_text = text
+        if not text:
+            st.warning("변경할 내용을 입력해주세요.")
+        else:
+            # Drop old preview before new compute
+            st.session_state.pop("pending_replan", None)
+            with st.spinner("변경 요청을 확인하고 있습니다..."):
+                outcome = _run_replan_pipeline(
+                    user_text=text, schedule=schedule, trip=trip, selected=selected,
+                    completed_keys=completed_keys, current_dt=current_dt,
+                    current_place_id=current_place_id)
+            if outcome["kind"] == "unsupported":
+                st.warning(outcome["message"])
+            elif outcome["kind"] == "confirm":
+                st.session_state.pending_confirmation = {
+                    "parse": outcome["parse"],
+                    "user_text": text,
+                }
+                st.rerun()
+            elif outcome["kind"] == "failed":
+                st.error(outcome["message"])
+            else:
+                import uuid
+                with st.spinner("남은 일정을 다시 계산하고 있습니다..."):
+                    pass  # already computed in pipeline
+                st.session_state.pending_replan = {
+                    "id": str(uuid.uuid4()),
+                    "user_text": text,
+                    "parse": outcome["parse"],
+                    "replan": outcome["replan"],
+                    "diff": outcome.get("diff"),
+                    "completed_keys": list(completed_keys),
+                    "current_place_id": current_place_id,
+                    "base_signature": outcome["base_signature"],
+                    "trip_signature": trip_replan_signature(
+                        trip, selected, preferred_place_id=preferred,
+                        lodging_key=lodging_key, schedule=schedule),
+                }
+                st.rerun()
+
+    pending = st.session_state.get("pending_replan")
+    if pending is None:
+        return
+
+    replan = pending["replan"]
+    parse = pending.get("parse")
+    diff = pending.get("diff")
+    if diff is None and replan.proposed_schedule is not None:
+        diff = compute_replan_diff(
+            schedule, replan.proposed_schedule, completed_ids=completed_keys,
+            events=getattr(parse, "events", ()) or (), replan=replan)
+        pending["diff"] = diff
+
+    st.markdown("### 일정 변경안")
+    st.write(f'요청: "{pending.get("user_text") or ""}"')
+    from models.replan import ReplanStatus as _RS
+    is_no_change = replan.status == _RS.REPLAN_NO_CHANGE
+    if is_no_change:
+        st.info(replan.notices[0] if replan.notices else status_user_message(replan.status))
+    else:
+        st.info(status_user_message(replan.status))
+
+    if parse and parse.events:
+        st.write("적용 요청:")
+        for line in event_request_lines(parse.events, schedule):
+            st.write(f"- {line}")
+    elif parse and getattr(parse, "intents", None):
+        for intent in parse.intents:
+            if intent.event_type == "PLACE_CLOSED" or (
+                    hasattr(intent.event_type, "value") and intent.event_type.value == "PLACE_CLOSED"):
+                st.caption("사용자 입력에 따른 제외 요청입니다. 실제 영업 종료를 확인한 결과가 아닙니다.")
+
+    if not is_no_change:
+        if diff and diff.summary_lines:
+            st.write("변경 사항:")
+            for line in diff.summary_lines:
+                st.write(f"- {line}")
+        if diff and diff.items:
+            removed = [d for d in diff.items if d.kind.value == "REMOVED"]
+            added = [d for d in diff.items if d.kind.value == "ADDED"]
+            timed = [d for d in diff.items if d.kind.value in {
+                "TIME_CHANGED", "MEAL_CHANGED", "RETURN_CHANGED", "ACCOMMODATION_CHANGED"}]
+            if removed:
+                st.write("제외:")
+                for item in removed:
+                    st.write(f"- {item.place_name}"
+                             + (f" ({item.detail})" if item.detail else ""))
+            if added:
+                st.write("추가:")
+                for item in added:
+                    st.write(f"- {item.place_name}"
+                             + (f" ({item.detail})" if item.detail else ""))
+            if timed:
+                st.write("시간·기타 변경:")
+                for item in timed:
+                    st.write(f"- {diff_kind_label(item.kind)}: {item.place_name}"
+                             + (f" ({item.detail})" if item.detail else ""))
+
+        if replan.main_status == "moved_meal":
+            st.write("- 기준 식당의 식사 시간대가 변경됩니다.")
+        elif replan.main_status == "INFEASIBLE":
+            st.warning("선택한 기준 장소를 현재 조건 안에 포함하기 어렵습니다.")
+
+        proposed = replan.proposed_schedule
+        if proposed is not None:
+            if proposed.return_journey or proposed.final_arrival_datetime:
+                for line in return_preview_lines(proposed):
+                    st.write(f"- {line}")
+            # FATIGUE: only claim reduction when after < before
+            if parse and any(
+                    (getattr(e, "event_type", None) and
+                     (e.event_type.value if hasattr(e.event_type, "value") else e.event_type) == "FATIGUE")
+                    for e in (parse.events or ())):
+                from services.replan_validate import _flat_items
+                from models.replan import item_key as _ik
+                before = sum(1 for i in _flat_items(schedule) if i.item_type != "TRAVEL"
+                             and _ik(i) not in completed_keys)
+                after = sum(1 for i in _flat_items(proposed) if i.item_type != "TRAVEL"
+                            and _ik(i) not in completed_keys)
+                if after < before:
+                    st.write(f"- 남은 활동 수를 줄인 변경안입니다. ({before}곳 → {after}곳)")
+
+        for notice in replan.notices:
+            if "MAIN_INFEASIBLE" in notice:
+                continue
+            st.caption(notice)
+
+    a1, a2 = st.columns(2)
+    apply_clicked = a1.button(
+        "변경 적용", key="replan_apply", type="primary", disabled=is_no_change)
+    cancel_clicked = a2.button("취소" if not is_no_change else "닫기", key="replan_cancel")
+
+    if cancel_clicked:
+        st.session_state.pop("pending_replan", None)
+        st.rerun()
+
+    if apply_clicked:
+        ok, message = can_apply_pending(
+            pending, active_schedule=schedule, trip=trip, selected=selected,
+            preferred_place_id=preferred, lodging_key=lodging_key,
+            already_applied_id=st.session_state.get("replan_applied_id"))
+        if not ok:
+            st.error(message)
+            st.session_state.pop("pending_replan", None)
+            return
+        st.session_state.replan_applied_id = pending.get("id")
+        st.session_state.trip_schedule = apply_pending_to_active(pending, schedule)
+        result = st.session_state.get("schedule_result")
+        if result is not None and hasattr(result, "model_copy"):
+            try:
+                st.session_state.schedule_result = result.model_copy(
+                    update={"schedule": st.session_state.trip_schedule})
+            except Exception:
+                pass
+        st.session_state.pop("pending_replan", None)
+        st.session_state.pop("pending_confirmation", None)
+        st.success("변경한 일정을 적용했습니다.")
+        st.rerun()
 
 
 def render_diagnostics(settings: Settings) -> None:

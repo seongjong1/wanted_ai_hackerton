@@ -40,6 +40,10 @@ def row(id="1", y=36.121, **extra):
 def service(anchor, rows):
     kakao, resolver = Mock(), Mock()
     kakao.search_places.return_value = rows
+    # Address-first DestinationResolver — empty list falls through to keyword rows.
+    kakao.search_addresses.return_value = [
+        {"address_name": "경북 구미시", "x": "128.33", "y": "36.12",
+         "address": {"address_name": "경북 구미시", "x": "128.33", "y": "36.12"}}]
     resolver.side_effect = lambda query: anchor if query == "구미역" else (_ for _ in ()).throw(ProviderError("no_data"))
     return PlaceService(kakao,resolve_point=resolver), kakao, resolver
 

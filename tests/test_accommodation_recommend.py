@@ -27,6 +27,13 @@ def lodging_row(place_id, name, x, y, category="여행 > 숙박 > 호텔", addre
     }
 
 
+def _gumi_address():
+    return [{
+        "address_name": "경북 구미시", "x": "128.33", "y": "36.12",
+        "address": {"address_name": "경북 구미시", "x": "128.33", "y": "36.12"},
+    }]
+
+
 def test_is_lodging_category_filters_non_hotels():
     assert is_lodging_category("여행 > 숙박 > 호텔")
     assert is_lodging_category("가정,생활 > 숙박 > 모텔")
@@ -37,6 +44,7 @@ def test_is_lodging_category_filters_non_hotels():
 def test_case1_2_3_search_real_kakao_rows_and_limit(trip, selected, anchor):
     request = multiday_trip(trip)
     kakao = Mock()
+    kakao.search_addresses.return_value = _gumi_address()
     kakao.search_places.side_effect = lambda query, **kwargs: [
         lodging_row(f"h{i}", f"호텔{i}", 128.33 + i * 0.01, 36.12 + i * 0.01)
         for i in range(8)
@@ -68,6 +76,7 @@ def test_case1_2_3_search_real_kakao_rows_and_limit(trip, selected, anchor):
 def test_case4_ranking_prefers_closer_hub_route(trip, selected, anchor):
     request = multiday_trip(trip)
     kakao = Mock()
+    kakao.search_addresses.return_value = _gumi_address()
     kakao.search_places.return_value = [
         lodging_row("near", "가까운호텔", 128.331, 36.121),
         lodging_row("far", "먼호텔", 128.45, 36.25),
@@ -168,6 +177,7 @@ def test_case18_return_respects_end_datetime(trip, selected, anchor):
 def test_case20_route_eval_capped(trip, selected, anchor):
     request = multiday_trip(trip)
     kakao = Mock()
+    kakao.search_addresses.return_value = _gumi_address()
     kakao.search_places.return_value = [
         lodging_row(f"h{i}", f"호텔{i}", 128.33 + i * 0.002, 36.12) for i in range(12)]
     transit = Mock()

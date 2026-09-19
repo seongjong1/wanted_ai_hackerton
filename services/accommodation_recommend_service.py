@@ -20,7 +20,8 @@ from providers.kakao_provider import KakaoProvider
 from providers.kakao_transit_provider import KakaoTransitProvider
 from services.access_service import AccessService
 from services.multiday_schedule_service import arrival_hub_query
-from services.place_service import belongs_to_destination, distance_meters
+from services.destination_resolver import matches_resolved_destination, resolve_destination
+from services.place_service import distance_meters
 
 logger = logging.getLogger("travel_ai.accommodation_recommend")
 
@@ -90,6 +91,7 @@ class AccommodationRecommendService:
     transit: KakaoTransitProvider | None
     access: AccessService
     config: ScheduleSettings
+    destination_scope_radius_meters: int = 3500
 
     def search(self, trip: TripRequest, selected: TransportCandidate,
                *, preferred: PlaceCandidate | None = None,
@@ -109,6 +111,16 @@ class AccommodationRecommendService:
         found: dict[str, AccommodationCandidate] = {}
         search_count = 0
         failed = 0
+        resolved = resolve_destination(
+            self.kakao, trip.destination, hub=hub,
+            area_radius_m=self.destination_scope_radius_meters)
+        if not resolved.is_resolved:
+            return AccommodationRecommendResult(
+                status="empty",
+                notices=(resolved.notice or (
+                    "여행지역을 정확히 확인하지 못했습니다. "
+                    "지역명을 조금 더 구체적으로 입력해주세요."),),
+                search_count=0)
         for term in self.config.accommodation_search_queries:
             query = f"{trip.destination} {term}"
             for page in range(1, self.config.accommodation_search_pages + 1):
@@ -122,8 +134,14 @@ class AccommodationRecommendService:
                     break
                 for row in rows:
                     address = row.get("road_address_name") or row.get("address_name") or ""
-                    if not isinstance(address, str) or not belongs_to_destination(
-                            trip.destination, address):
+                    try:
+                        x = float(row["x"])
+                        y = float(row["y"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    if (not isinstance(address, str)
+                            or not matches_resolved_destination(
+                                resolved, address, latitude=y, longitude=x)):
                         continue
                     category = row.get("category_name") or ""
                     if not is_lodging_category(category):
@@ -131,8 +149,6 @@ class AccommodationRecommendService:
                     try:
                         pid = str(row["id"])
                         name = str(row["place_name"])
-                        x = float(row["x"])
-                        y = float(row["y"])
                     except (KeyError, TypeError, ValueError):
                         continue
                     if pid in found:
@@ -218,7 +234,8 @@ def search_accommodation_candidates(
         transit = KakaoTransitProvider(settings.kakao_rest_api_key, http)
         access = AccessService(kakao, transit)
         service = AccommodationRecommendService(
-            kakao, transit, access, settings.schedule)
+            kakao, transit, access, settings.schedule,
+            destination_scope_radius_meters=settings.destination_scope_radius_meters)
         return service.search(
             trip, selected, preferred=preferred, schedule=schedule, place_pool=place_pool)
     except ProviderError:
