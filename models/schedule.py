@@ -6,7 +6,7 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
-from models.access import AccessPoint, AccessLeg
+from models.access import AccessPoint, AccessLeg, AccessStep
 from models.transport import TransportCandidate
 
 
@@ -37,6 +37,8 @@ class ScheduleItem(BaseModel):
     destination: AccessPoint | None = None
     travel_mode: tuple[str, ...] = ()
     travel_duration_minutes: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    # Kakao AccessRoute.steps preserved for Timeline detail (optional presentation).
+    route_steps: tuple[AccessStep, ...] = ()
     estimated_duration: bool = False
     preference: str = ""
     meal_slot: str | None = None

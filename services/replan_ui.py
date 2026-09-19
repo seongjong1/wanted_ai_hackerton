@@ -222,7 +222,7 @@ def status_user_message(status: ReplanStatus) -> str:
         ReplanStatus.REPLAN_PARTIAL: "일부 일정을 줄이거나 제외해 가능한 일정으로 조정했습니다.",
         ReplanStatus.REPLAN_INFEASIBLE: "현재 조건으로는 요청한 변경과 기존 제약을 모두 만족하기 어렵습니다.",
         ReplanStatus.REPLAN_FAILED: "일정을 다시 계산하지 못했습니다. 기존 일정은 그대로 유지됩니다.",
-        ReplanStatus.REPLAN_NO_CHANGE: "적용할 수 있는 실질적인 일정 변경이 없습니다.",
+        ReplanStatus.REPLAN_NO_CHANGE: "현재 조건에서는 적용할 실질적인 일정 변경이 없습니다.",
     }.get(status, "일정 변경 결과를 확인해주세요.")
 
 

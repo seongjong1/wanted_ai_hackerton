@@ -87,7 +87,7 @@ def test_compact_transport_persists(monkeypatch):
     assert len([b for b in app.button if b.key and b.key.startswith("select_transport_")]) == len(result.candidates)
     app.button(key="select_transport_1").click().run()
     for _ in range(2):
-        toggle = next(e for e in app.expander if e.label.startswith("다른 추천 교통편"))
+        toggle = next(e for e in app.expander if e.label.startswith("다른 교통편"))
         assert toggle.proto.expanded is False
         assert not any(b.key == "select_transport_1" for b in app.button)
         assert any(b.key == "select_transport_2" for b in toggle.button)

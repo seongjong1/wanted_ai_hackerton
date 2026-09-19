@@ -187,6 +187,6 @@ def test_compact_outbound_ui_stays_collapsed(monkeypatch):
     assert "추천 교통편" in [s.value for s in app.subheader]
     app.button(key="select_transport_1").click().run()
     assert "선택한 교통편" in [s.value for s in app.subheader]
-    expanders = [e for e in app.expander if e.label.startswith("다른 추천 교통편 보기")]
+    expanders = [e for e in app.expander if e.label.startswith("다른 교통편 보기")]
     assert expanders and all(getattr(e, "expanded", False) is False or e.value is False or e.value is None
                              for e in expanders)

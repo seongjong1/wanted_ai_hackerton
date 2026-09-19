@@ -46,6 +46,8 @@ def render_day_timeline(
         completed_keys: frozenset[str] | None = None,
         current_datetime: datetime | None = None,
 ) -> None:
+    from services.route_detail_display import meaningful_route_steps, route_step_lines
+
     st.markdown("**일정 타임라인**")
     done = completed_keys or frozenset()
     divider_drawn = False
@@ -86,6 +88,20 @@ def render_day_timeline(
             st.write(event.title)
             if event.detail:
                 st.caption(event.detail)
+            steps = meaningful_route_steps(getattr(event, "route_steps", ()) or ())
+            show_detail = bool(steps) and event.kind in {
+                "TRAVEL", "RETURN_HUB", "RETURN_ACCESS"}
+            if event.kind == "OUTBOUND" and steps and "출발지 접근" in (event.detail or ""):
+                show_detail = True
+            if show_detail:
+                label = (
+                    "접근 경로 자세히 보기"
+                    if event.kind in {"OUTBOUND", "RETURN_ACCESS"}
+                    else "이동 경로 자세히 보기")
+                with st.expander(label, expanded=False):
+                    for step in steps:
+                        for line in route_step_lines(step):
+                            st.text(line)
     if view.return_summary is not None and view.return_summary.cutoff is not None:
         st.markdown("**귀가 요약**")
         st.caption(f"목적지 활동 종료 권장 한도: {view.return_summary.cutoff:%H:%M}")
@@ -101,14 +117,24 @@ def render_schedule_visualization(
         completed_keys: frozenset[str] | None = None,
         current_datetime: datetime | None = None,
 ) -> None:
-    """Summary + Map + Timeline per day; raw detail moved to expander."""
+    """Summary + Map + Timeline per day; raw detail / return moved to expander."""
     views = build_schedule_views(
         schedule, trip=trip, selected=selected, candidates=candidates)
     if schedule.accommodation_status == "PROVISIONAL" and schedule.accommodation:
         st.caption(
-            f"숙소: 미정 · 임시 기준점: {schedule.accommodation.name}")
+            f"숙소 미정 · 임시 기준점: {schedule.accommodation.name}")
     elif schedule.accommodation_status == "CONFIRMED" and schedule.accommodation:
         st.caption(f"숙소: {schedule.accommodation.name}")
+
+    def _detail_expander(view: DayView, day_items, day_start, *, show_return: bool) -> None:
+        with st.expander("일정 상세 보기", expanded=False):
+            render_raw_items(day_items, day_start)
+            if day_items is not schedule.items and schedule.accommodation and view.role != "FINAL":
+                label = lodging_ui_label(schedule.accommodation_status)
+                st.caption(f"{label} · {schedule.accommodation.name}")
+        if show_return:
+            with st.expander("돌아가는 길 자세히 보기", expanded=False):
+                render_return(schedule)
 
     if len(views) == 1 and views[0].role == "SINGLE":
         view = views[0]
@@ -116,9 +142,7 @@ def render_schedule_visualization(
         render_day_map(view, key="day_map_single")
         render_day_timeline(
             view, completed_keys=completed_keys, current_datetime=current_datetime)
-        with st.expander("일정 상세 보기", expanded=False):
-            render_raw_items(schedule.items, schedule.trip_start_datetime)
-            render_return(schedule)
+        _detail_expander(view, schedule.items, schedule.trip_start_datetime, show_return=True)
         return
 
     tabs = st.tabs([f"{view.date:%m/%d} · {view.day_index}일차" for view in views])
@@ -128,10 +152,5 @@ def render_schedule_visualization(
             render_day_map(view, key=f"day_map_{view.day_index}")
             render_day_timeline(
                 view, completed_keys=completed_keys, current_datetime=current_datetime)
-            if view.role == "FINAL":
-                render_return(schedule)
-            with st.expander("일정 상세 보기", expanded=False):
-                render_raw_items(day.items, day.activity_start)
-                if day.role != "FINAL" and schedule.accommodation:
-                    label = lodging_ui_label(schedule.accommodation_status)
-                    st.caption(f"{label} · {schedule.accommodation.name}")
+            _detail_expander(
+                view, day.items, day.activity_start, show_return=(view.role == "FINAL"))

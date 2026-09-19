@@ -600,7 +600,7 @@ def test_app_has_replan_panel_and_no_engine_terms():
     from pathlib import Path
     src = Path("app.py").read_text(encoding="utf-8")
     assert "render_replan_panel" in src
-    assert "여행 중 일정 변경" in src
+    assert "일정이 틀어졌나요?" in src
     assert "변경 적용" in src
     # User-facing copy should not expose engine jargon in UI strings
     assert 'st.write("ReplanEvent")' not in src
@@ -618,7 +618,7 @@ def test_app_user_facing_copy_hides_phase_and_gumi_example():
     assert 'page_title="AI 여행 플래너"' not in src
     assert 'st.caption("Phase 5' not in src
     assert "지금 구미역이야" not in src
-    assert "여기 문 닫았어 · 시장은 빼줘 · 30분 늦었어 · 너무 피곤해" in src
+    assert "여기 문 닫았어 · 시장 빼줘 · 30분 늦었어 · 너무 피곤해" in src
     assert 'st.markdown("**귀가 요약**")' in vis
     assert "목적지 활동 종료 권장 한도" in vis
     assert "st.success(" not in vis

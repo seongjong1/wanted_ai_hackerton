@@ -24,6 +24,10 @@ class AccessStep(BaseModel):
     duration_seconds: float = Field(ge=0, allow_inf_nan=False)
     distance_meters: float = Field(ge=0, allow_inf_nan=False)
     guidance: str = ""
+    # Optional Kakao publictraffic fields — never invent when absent.
+    line_name: str = ""
+    start_name: str = ""
+    end_name: str = ""
 
 
 class AccessRoute(BaseModel):

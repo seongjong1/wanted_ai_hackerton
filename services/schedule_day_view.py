@@ -10,7 +10,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from models.access import AccessPoint
+from models.access import AccessPoint, AccessStep, is_estimated_access
 from models.place import PlaceCandidate
 from models.schedule import ReturnStatus, ScheduleItem, TripDaySchedule, TripSchedule
 from models.transport import TransportCandidate, TransportType
@@ -67,6 +67,8 @@ class TimelineEvent(BaseModel):
     is_main: bool = False
     sequence: int | None = None
     place_id: str = ""
+    # Optional Kakao segments for TRAVEL / local Return Access (presentation only).
+    route_steps: tuple[AccessStep, ...] = ()
 
 
 class DaySummary(BaseModel):
@@ -262,10 +264,12 @@ def build_outbound_timeline(selected: TransportCandidate | None) -> list[Timelin
                     title=f"{hub} 출발 준비",
                     detail="접근 이동 없음"))
         else:
+            steps = () if is_estimated_access(leg) else tuple(getattr(leg, "steps", ()) or ())
             events.append(TimelineEvent(
                 kind="OUTBOUND", start=leg.departure_time, end=leg.arrival_time,
                 title=f"{leg.origin} → {leg.destination}",
-                detail=f"출발지 접근 · 약 {int(round(leg.duration_minutes))}분"))
+                detail=f"출발지 접근 · 약 {int(round(leg.duration_minutes))}분",
+                route_steps=steps))
     transport_label = TRAVEL_MODE_LABELS.get(
         selected.transport_type.value if isinstance(selected.transport_type, TransportType)
         else str(selected.transport_type),
@@ -475,13 +479,24 @@ def build_day_view(
                         at_lodging=awaiting_first_departure,
                         provisional=status == "PROVISIONAL")))
         if item.item_type == "TRAVEL":
+            # UI-only: hide same-place / ~0분 hops (schedule logic unchanged).
+            dur = item.travel_duration_minutes
+            same = (
+                item.origin is not None and item.destination is not None
+                and item.origin.id == item.destination.id
+            )
+            if same and (dur is None or dur <= 0.5):
+                previous = item.end_datetime
+                awaiting_first_departure = False
+                continue
             origin_name = item.origin.name if item.origin else ""
             dest_name = item.destination.name if item.destination else item.place_name
             timeline.append(TimelineEvent(
                 kind="TRAVEL", start=item.start_datetime, end=item.end_datetime,
                 title=f"{origin_name} → {dest_name}",
                 detail=f"{_travel_label(item)} · 약 {int(round(item.duration_minutes))}분",
-                place_id=item.place_id))
+                place_id=item.place_id,
+                route_steps=tuple(getattr(item, "route_steps", ()) or ())))
             awaiting_first_departure = False
         else:
             awaiting_first_departure = False
@@ -544,10 +559,12 @@ def build_day_view(
         journey = schedule.return_journey
         if journey is not None:
             hub_leg = journey.to_hub
+            hub_steps = () if is_estimated_access(hub_leg) else tuple(getattr(hub_leg, "steps", ()) or ())
             timeline.append(TimelineEvent(
                 kind="RETURN_HUB", start=hub_leg.departure_time, end=hub_leg.arrival_time,
                 title=f"{hub_leg.origin} → {hub_leg.destination}",
-                detail=f"Return Hub 이동 · 약 {int(round(hub_leg.duration_minutes))}분"))
+                detail=f"Return Hub 이동 · 약 {int(round(hub_leg.duration_minutes))}분",
+                route_steps=hub_steps))
             timeline.append(TimelineEvent(
                 kind="RETURN_PREP", start=hub_leg.arrival_time, end=None,
                 title=f"{hub_leg.destination} 도착",
@@ -564,10 +581,12 @@ def build_day_view(
                 title=f"{transport.departure_place} → {transport.arrival_place}",
                 detail=f"{t_label} · 약 {int(round(transport.duration_minutes))}분"))
             home = journey.to_origin
+            home_steps = () if is_estimated_access(home) else tuple(getattr(home, "steps", ()) or ())
             timeline.append(TimelineEvent(
                 kind="RETURN_ACCESS", start=home.departure_time, end=home.arrival_time,
                 title=f"{home.origin} → {home.destination}",
-                detail=f"출발지 이동 · 약 {int(round(home.duration_minutes))}분"))
+                detail=f"출발지 이동 · 약 {int(round(home.duration_minutes))}분",
+                route_steps=home_steps))
             done_at = schedule.final_arrival_datetime or home.arrival_time
             timeline.append(TimelineEvent(
                 kind="RETURN_DONE", start=done_at, end=None,

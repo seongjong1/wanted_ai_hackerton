@@ -16,15 +16,15 @@ def test_ui_validation_and_session_state(monkeypatch):
     app.multiselect[0].set_value(["맛집", "관광"])
     app.button[0].click().run()
     assert not app.exception
-    assert len(app.success) == 1
+    assert any("여행 조건을 확인했습니다" in c.value for c in app.caption)
     assert app.session_state.trip_request.destination == "부산"
     app.run()
-    assert len(app.success) == 1
+    assert any("여행 조건을 확인했습니다" in c.value for c in app.caption)
     assert search.call_count == 1
     app.text_input[1].set_value("서울역")
     app.button[0].click().run()
     assert len(app.error) == 1
-    assert len(app.success) == 0
+    assert not any("여행 조건을 확인했습니다" in c.value for c in app.caption)
     assert "transport_candidates" not in app.session_state
     assert "selected_transport" not in app.session_state
 
@@ -170,7 +170,7 @@ def test_render_candidate_hides_same_place_zero_access(monkeypatch):
     app, _ = _render_access_app(monkeypatch, leg)
     assert not app.exception
     visible = "\n".join(item.value for elements in (app.markdown, app.caption) for item in elements)
-    assert "접근 이동 없음 · 서울역에서 바로 출발" in visible
+    assert "서울역에서 바로 출발" in visible
     assert "접근 이동: 서울역 → 서울역" not in visible
     assert "서울역 → 서울역 · 0분" not in visible
 

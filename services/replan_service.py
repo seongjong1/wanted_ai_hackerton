@@ -287,7 +287,7 @@ def _return_feasible_from(
     hub = journey.to_hub.destination_point
     if hub is None:
         return True
-    minutes, _ = _estimate_travel_minutes(point, hub, schedule, resolve_route)
+    minutes, _, _ = _estimate_travel_minutes(point, hub, schedule, resolve_route)
     arrive_hub = end_time + timedelta(minutes=max(minutes, 0.0))
     ready = arrive_hub + timedelta(minutes=journey.boarding_buffer_minutes)
     return ready <= journey.transport.departure_time
@@ -312,16 +312,18 @@ def _haversine_meters(a: AccessPoint, b: AccessPoint) -> float:
     return 2 * 6_371_000 * asin(sqrt(h))
 
 
-def _lookup_cached_travel_minutes(
+def _lookup_cached_travel(
         schedule: TripSchedule, origin_id: str, dest_id: str,
-) -> float | None:
+) -> tuple[float, tuple[str, ...], tuple] | None:
     for item in _flat_items(schedule):
         if item.item_type != "TRAVEL" or not item.origin or not item.destination:
             continue
         if item.origin.id == origin_id and item.destination.id == dest_id:
             minutes = item.travel_duration_minutes
             if minutes and minutes > 0:
-                return float(minutes)
+                modes = item.travel_mode or ("BUS",)
+                steps = tuple(getattr(item, "route_steps", ()) or ())
+                return float(minutes), tuple(modes), steps
     return None
 
 
@@ -330,26 +332,27 @@ def _estimate_travel_minutes(
         dest: AccessPoint,
         schedule: TripSchedule,
         resolve_route=None,
-) -> tuple[float, tuple[str, ...]]:
+) -> tuple[float, tuple[str, ...], tuple]:
     """Prefer cache / optional Kakao resolver; else distance estimate. Never invent places."""
     if origin.id == dest.id:
-        return 0.0, ()
-    cached = _lookup_cached_travel_minutes(schedule, origin.id, dest.id)
+        return 0.0, (), ()
+    cached = _lookup_cached_travel(schedule, origin.id, dest.id)
     if cached is not None:
-        return cached, ("BUS",)
+        return cached
     if resolve_route is not None:
         try:
             route = resolve_route(origin, dest)
             if route is not None and getattr(route, "duration_seconds", 0) > 0:
                 modes = tuple(dict.fromkeys(
                     getattr(s, "mode", "BUS") for s in getattr(route, "steps", ()) or ()))
-                return float(route.duration_seconds) / 60.0, modes or ("BUS",)
+                steps = tuple(getattr(route, "steps", ()) or ())
+                return float(route.duration_seconds) / 60.0, modes or ("BUS",), steps
         except Exception:
             logger.info("replan route_resolver_failed origin=%s dest=%s", origin.id, dest.id)
     meters = _haversine_meters(origin, dest)
     # ~18 km/h effective transit + 8 min overhead
     minutes = max(8.0, min(90.0, meters / 300.0 + 8.0))
-    return minutes, ("BUS",)
+    return minutes, ("BUS",), ()
 
 
 def _make_travel(
@@ -363,7 +366,7 @@ def _make_travel(
 ) -> ScheduleItem | None:
     if origin.id == dest.id:
         return None
-    minutes, modes = _estimate_travel_minutes(origin, dest, schedule, resolve_route)
+    minutes, modes, steps = _estimate_travel_minutes(origin, dest, schedule, resolve_route)
     if minutes <= 0:
         return None
     end = start + timedelta(minutes=minutes)
@@ -377,6 +380,7 @@ def _make_travel(
         destination=dest,
         travel_mode=modes or ("BUS",),
         travel_duration_minutes=minutes,
+        route_steps=steps,
         reason=reason,
         validation_status="VALIDATED",
     )
@@ -920,7 +924,7 @@ def _build_return_access_leg(
             and old_leg.origin_point.id == origin.id
             and old_leg.destination_point.id == hub.id):
         return old_leg.model_copy(update={"departure_time": departure})
-    minutes, modes = _estimate_travel_minutes(origin, hub, schedule, resolve_route)
+    minutes, modes, steps = _estimate_travel_minutes(origin, hub, schedule, resolve_route)
     if minutes <= 0:
         minutes = 1.0
     return AccessLeg(
@@ -930,6 +934,7 @@ def _build_return_access_leg(
         duration_minutes=minutes,
         departure_time=departure,
         provider="REPLAN",
+        steps=steps,
         origin_point=origin,
         destination_point=hub,
         estimated="ESTIMATED" in (modes or ()),

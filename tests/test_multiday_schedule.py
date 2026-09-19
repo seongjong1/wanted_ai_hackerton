@@ -398,6 +398,7 @@ def test_ui_lodging_choice_and_no_duplicate_warning(monkeypatch):
     app.date_input[1].set_value(request.end_date)
     app.multiselect[0].set_value(["맛집", "관광"])
     app.button[0].click().run()
+    app.button(key="select_transport_1").click().run()
     assert "숙소" in [s.value for s in app.subheader]
     # Multi-day date range shows lodging panel (known vs undecided) without a separate overnight checkbox.
     app.radio(key="accommodation_choice_radio").set_value("숙소를 정했어요").run()
@@ -410,9 +411,8 @@ def test_ui_lodging_choice_and_no_duplicate_warning(monkeypatch):
     visible = "\n".join(item.value for group in (app.info, app.warning, app.caption, app.markdown)
                         for item in group)
     assert visible.count(warning) == 0
-    app.button(key="select_transport_1").click().run()
     app.button(key="search_nearby_places").click().run()
-    app.button(key="generate_schedule").click().run()
+    app.button(key="anchor_schedule_0").click().run()
     assert generate.call_count == 1
     assert generate.call_args.kwargs.get("accommodation_point") == stay
     assert generate.call_args.kwargs.get("accommodation_undecided") is False
@@ -496,10 +496,10 @@ def test_ui_provisional_then_confirm_stales(monkeypatch):
     app.date_input[1].set_value(request.end_date)
     app.multiselect[0].set_value(["맛집", "관광"])
     app.button[0].click().run()
-    app.radio(key="accommodation_choice_radio").set_value("아직 숙소를 정하지 않았어요").run()
     app.button(key="select_transport_1").click().run()
+    app.radio(key="accommodation_choice_radio").set_value("아직 숙소를 정하지 않았어요").run()
     app.button(key="search_nearby_places").click().run()
-    app.button(key="generate_schedule").click().run()
+    app.button(key="anchor_schedule_0").click().run()
     assert generate.call_args.kwargs.get("accommodation_undecided") is True
     assert app.session_state.trip_schedule.accommodation_status == "PROVISIONAL"
     texts = []
@@ -514,7 +514,6 @@ def test_ui_provisional_then_confirm_stales(monkeypatch):
     lodging_inputs = [i for i in app.text_input if "숙소명 또는 주소" in (i.label or "")]
     lodging_inputs[0].set_value("구미 테스트 숙소").run()
     app.button(key="confirm_accommodation").click().run()
-    app.button(key="generate_schedule").click().run()
     assert generate.call_count == 2
     assert generate.call_args.kwargs.get("accommodation_undecided") is False
     assert app.session_state.trip_schedule.accommodation_status == "CONFIRMED"
@@ -588,15 +587,15 @@ def test_ui_recommend_select_confirms_and_stales(monkeypatch):
     app.date_input[1].set_value(request.end_date)
     app.multiselect[0].set_value(["맛집", "관광"])
     app.button[0].click().run()
-    app.radio(key="accommodation_choice_radio").set_value("아직 숙소를 정하지 않았어요").run()
     app.button(key="select_transport_1").click().run()
+    app.radio(key="accommodation_choice_radio").set_value("아직 숙소를 정하지 않았어요").run()
     assert recommend.call_count >= 1
     assert "예약 가능한 숙소" not in "\n".join(c.value for c in app.caption)
     app.button(key=f"select_lodging_{stay_a.id}").click().run()
     assert app.session_state.accommodation_point.id == stay_a.id
     assert app.session_state.accommodation_source == "recommended"
     app.button(key="search_nearby_places").click().run()
-    app.button(key="generate_schedule").click().run()
+    app.button(key="anchor_schedule_0").click().run()
     assert generate.call_count == 1
     assert generate.call_args.kwargs.get("accommodation_undecided") is False
     assert generate.call_args.kwargs.get("accommodation_point").id == stay_a.id
@@ -604,7 +603,6 @@ def test_ui_recommend_select_confirms_and_stales(monkeypatch):
     app.button(key="clear_recommended_accommodation").click().run()
     assert "trip_schedule" not in app.session_state
     app.button(key=f"select_lodging_{stay_b.id}").click().run()
-    app.button(key="generate_schedule").click().run()
     assert generate.call_count == 2
     assert generate.call_args.kwargs.get("accommodation_point").id == stay_b.id
     assert not app.exception
@@ -681,15 +679,16 @@ def test_ui_return_only_on_final_day_and_seat_copy(monkeypatch):
     app.date_input[1].set_value(request.end_date)
     app.multiselect[0].set_value(["맛집", "관광"])
     app.button[0].click().run()
-    app.radio(key="accommodation_choice_radio").set_value("아직 숙소를 정하지 않았어요").run()
     app.button(key="select_transport_1").click().run()
     assert any("좌석/매진 여부는 예매처에서 확인 필요" in c.value for c in app.caption)
     assert not any("예약되지 않았습니다" in c.value for c in app.caption)
+    app.radio(key="accommodation_choice_radio").set_value("아직 숙소를 정하지 않았어요").run()
     app.button(key="search_nearby_places").click().run()
-    app.button(key="generate_schedule").click().run()
+    app.button(key="anchor_schedule_0").click().run()
     dwell = "체류시간은 기본 추정값입니다"
     assert sum(1 for v in app.info if dwell in v.value) == 0
-    assert "돌아가는 길" in [s.value for s in app.subheader]
+    assert any(
+        str(getattr(e, "label", "")).startswith("돌아가는 길") for e in app.expander)
     assert any("활동 종료 권장 한도" in c.value for c in app.caption)
     assert any("15:50" in getattr(m, "value", "") for m in list(app.markdown) + list(app.caption))
     assert not app.exception

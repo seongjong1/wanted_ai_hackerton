@@ -167,6 +167,6 @@ def test_case8_transport_collapse_regression(monkeypatch):
     app.button[0].click().run()
     app.button(key="select_transport_1").click().run()
     assert "선택한 교통편" in [s.value for s in app.subheader]
-    expanders = [e for e in app.expander if str(getattr(e, "label", "")).startswith("다른 추천 교통편 보기")]
+    expanders = [e for e in app.expander if str(getattr(e, "label", "")).startswith("다른 교통편 보기")]
     assert expanders
     assert not app.exception

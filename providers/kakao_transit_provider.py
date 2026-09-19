@@ -6,8 +6,9 @@ from collections import OrderedDict
 
 from pydantic import ValidationError
 
-from models.access import AccessPoint, AccessRoute, AccessStep
+from models.access import AccessPoint, AccessRoute
 from providers.http_client import HttpClient, ProviderError, require_key
+from services.kakao_route_steps import parse_access_step
 
 logger = logging.getLogger("travel_ai.kakao_transit")
 
@@ -62,11 +63,14 @@ class KakaoTransitProvider:
             for row in raw_routes:
                 try:
                     properties = row["properties"]
-                    steps = tuple(AccessStep(mode=step["properties"]["type"],
-                                             duration_seconds=step["properties"]["time"],
-                                             distance_meters=step["properties"]["distance"],
-                                             guidance=step["properties"].get("guidance", ""))
-                                  for step in row["steps"])
+                    parsed = []
+                    for step in row["steps"]:
+                        access_step = parse_access_step(step)
+                        if access_step is not None:
+                            parsed.append(access_step)
+                    steps = tuple(parsed)
+                    if not steps:
+                        continue
                     routes.append(AccessRoute(duration_seconds=properties["totalTime"],
                                               distance_meters=properties["totalDistance"],
                                               transfers=properties["transfers"], steps=steps))

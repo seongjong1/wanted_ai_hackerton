@@ -27,7 +27,7 @@ def read_settings() -> Settings:
 def render_trip_form() -> None:
     today = datetime.now(ZoneInfo("Asia/Seoul")).date()
     with st.form("trip_form"):
-        st.subheader("여행 기본정보")
+        st.subheader("여행 계획 만들기")
         left, right = st.columns(2)
         departure = left.text_input("출발지", placeholder="역명, 건물명 또는 도로명 주소", max_chars=200)
         destination = right.text_input("여행지", placeholder="예: 부산 해운대", max_chars=200)
@@ -35,27 +35,26 @@ def render_trip_form() -> None:
         end_date = right.date_input("여행 종료 날짜", value=today)
         departure_time = left.time_input("출발 희망 시간", value=time(9))
         end_time = right.time_input("귀가 완료 목표 시간", value=time(20))
-        # Multi-day (end_date > start_date) always requires overnight lodging.
-        # Same-day trips never need an accommodation section.
+        preferences = st.multiselect(
+            "여행 성향 (최소 1개)",
+            [p.value for p in Preference],
+        )
         if end_date > start_date:
-            st.caption("1박 이상 여행입니다. 숙소는 아래에서 정함/미정만 선택합니다.")
+            st.caption("1박 이상이면 숙소 정함/미정만 선택합니다. (숙박하지 않음 옵션 없음)")
         else:
             st.caption("당일 여행 · 숙소 선택이 필요하지 않습니다.")
-        st.caption("국내 여행 · 모든 날짜와 시간은 한국 시각 기준입니다.")
 
-        st.subheader("동행 및 조건")
-        allergies = st.text_input("음식 알레르기", placeholder="예: 땅콩, 갑각류 (쉼표로 구분)",
-                                  max_chars=1000)
-        left, right = st.columns(2)
-        has_pet = left.checkbox("반려동물 동반")
-        has_child = right.checkbox("아이 동반")
-        activity_radius = st.selectbox("활동반경", RADIUS_OPTIONS, index=4)
-        st.caption("활동반경은 선택 장소 주변의 추가 검색에 적용됩니다. ‘500m 이상’은 설정된 반경 상한을 사용합니다.")
+        with st.expander("여행 조건 더 설정하기", expanded=False):
+            allergies = st.text_input(
+                "음식 알레르기", placeholder="예: 땅콩, 갑각류 (쉼표로 구분)", max_chars=1000)
+            left, right = st.columns(2)
+            has_pet = left.checkbox("반려동물 동반")
+            has_child = right.checkbox("아이 동반")
+            activity_radius = st.selectbox("활동반경", RADIUS_OPTIONS, index=4)
+            st.caption("활동반경은 선택 장소 주변 추가 검색에 적용됩니다. ‘500m 이상’은 설정된 상한을 사용합니다.")
+            st.caption("국내 여행 · 모든 날짜와 시간은 한국 시각 기준입니다.")
 
-        st.subheader("여행 성향")
-        preferences = st.multiselect("선호하는 여행을 선택하세요 (최소 1개)",
-                                     [p.value for p in Preference])
-        submitted = st.form_submit_button("여행 계획 생성", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("여행 계획 만들기", type="primary", use_container_width=True)
 
     if submitted:
         for key in ("trip_request", "transport_result", "transport_candidates", "selected_transport",
@@ -96,8 +95,7 @@ def render_trip_form() -> None:
             st.session_state.selected_transport = None
 
     if "trip_request" in st.session_state:
-        st.success("여행 조건을 확인했습니다.")
-        render_accommodation_panel()
+        st.caption("여행 조건을 확인했습니다. 아래에서 교통편을 선택하세요.")
         render_origin_address_form()
         render_transport_results()
 
@@ -112,10 +110,20 @@ def _clear_replan_state() -> None:
         st.session_state.pop(key, None)
 
 
-def _stale_accommodation_schedule() -> None:
+def _stale_accommodation_schedule(*, request_rebuild: bool = True) -> None:
+    had_schedule = st.session_state.get("trip_schedule") is not None
+    preferred = (
+        st.session_state.get("user_selected_place_id")
+        or st.session_state.get("schedule_preferred_place_id"))
     for key in ("trip_schedule", "schedule_result", "schedule_signature"):
         st.session_state.pop(key, None)
     _clear_replan_state()
+    # Rebuild only when a schedule already existed or MAIN/preferred is set
+    # (same auto path as MAIN selection — no separate generate CTA).
+    if request_rebuild and (had_schedule or preferred):
+        st.session_state.schedule_anchor_pending = True
+    elif not request_rebuild:
+        st.session_state.pop("schedule_anchor_pending", None)
 
 
 def _clear_recommended_accommodation() -> None:
@@ -233,9 +241,9 @@ def render_accommodation_panel() -> None:
                     if point.address:
                         st.caption(point.address)
                     st.caption("이 숙소를 전체 숙박일의 기준으로 사용합니다.")
-                if st.button("다른 숙소 후보 보기", key="clear_recommended_accommodation"):
+                if st.button("다른 숙소 보기", key="clear_recommended_accommodation"):
                     _clear_recommended_accommodation()
-                    _stale_accommodation_schedule()
+                    _stale_accommodation_schedule(request_rebuild=False)
                     st.rerun()
             else:
                 st.markdown("### 추천 숙소 후보")
@@ -305,7 +313,8 @@ def format_minutes(value: float) -> str:
     return f"{value:g}분" if float(value).is_integer() else f"약 {int(value + 0.5)}분"
 
 
-def render_candidate(candidate: TransportCandidate, number: int, *, selectable: bool) -> None:
+def render_candidate(candidate: TransportCandidate, number: int, *, selectable: bool,
+                     compact: bool = False) -> None:
     with st.container(border=True):
         label = f"추천 {number} · " if selectable else ""
         st.write(f"**{label}{TRANSPORT_LABELS[candidate.transport_type]} · {candidate.grade or '등급 정보 없음'}**")
@@ -316,36 +325,15 @@ def render_candidate(candidate: TransportCandidate, number: int, *, selectable: 
         if candidate.access is not None:
             boarding = candidate.access
             leg = boarding.access_leg
-            modes = {"BUS": "버스", "SUBWAY": "지하철", "WALKING": "도보",
-                     "SAME_PLACE": "같은 장소", "ESTIMATED": "추정"}
-            estimated_access = is_estimated_access(leg)
-            trivial_access = is_trivial_same_place_access(leg)
-            if trivial_access:
+            if is_trivial_same_place_access(leg):
                 hub = access_hub_label(leg) or candidate.departure_place
-                st.write(f"접근 이동 없음 · {hub}에서 바로 출발")
-            elif estimated_access:
-                st.write(f"접근 이동(추정): {leg.origin} → {leg.destination} · {format_minutes(leg.duration_minutes)}")
-                st.caption("실제 대중교통 경로가 아닙니다. 경로 API를 확인하지 못해 직선거리 기반 추정 시간을 사용합니다.")
-            else:
-                st.write(f"접근 이동: {leg.origin} → {leg.destination} · {format_minutes(leg.duration_minutes)}")
-                st.caption(" + ".join(modes.get(mode, mode) for mode in getattr(leg, "transport_modes", ()))
-                           + f" · 환승 {getattr(leg, 'transfers', 0)}회")
-            if not trivial_access:
-                st.write(f"출발 가능 {leg.departure_time:%H:%M} → 거점 도착 {leg.arrival_time:%H:%M:%S}"
-                         f" → 승차 준비 완료 {boarding.ready_time:%H:%M:%S}")
-            st.write(f"승차 버퍼 {format_minutes(boarding.buffer_minutes)} · 추가 대기 {format_minutes(boarding.waiting_minutes)}"
-                     f" · 총 소요시간 {format_minutes(boarding.total_duration_minutes)}")
-            steps = [step for step in getattr(leg, "steps", ()) if getattr(step, "mode", "").strip() and
-                     (getattr(step, "duration_seconds", 0) > 0 or getattr(step, "distance_meters", 0) > 0
-                      or getattr(step, "guidance", "").strip())]
-            if steps and not estimated_access and not trivial_access:
+                st.caption(f"{hub}에서 바로 출발")
+            elif compact:
                 with st.expander("접근 경로 자세히 보기", expanded=False):
-                    for step in steps:
-                        st.text(f"{modes.get(step.mode, step.mode)} · {format_minutes(step.duration_seconds / 60)}"
-                                f" · {step.distance_meters:g}m · {step.guidance}")
-            elif estimated_access:
-                st.caption(getattr(leg, "note", "") or "추정 접근 시간")
-        if candidate.train_number:
+                    _render_access_details(boarding, leg, steps_expander_label="구간별 경로")
+            else:
+                _render_access_details(boarding, leg)
+        if candidate.train_number and not compact:
             st.caption(f"열차 번호 {candidate.train_number}")
         if selectable and st.button("이 교통편 선택", key=f"select_transport_{number}"):
             for key in ("place_result", "place_candidates", "place_anchor", "nearby_result", "trip_schedule", "schedule_result", "schedule_preferred_place_id", "user_selected_place_id", "main_place_list_expanded", "schedule_anchor_pending", "origin_address_input", "origin_address_error"):
@@ -355,6 +343,43 @@ def render_candidate(candidate: TransportCandidate, number: int, *, selectable: 
                 st.session_state.pop(key, None)
             _clear_replan_state()
             st.rerun()
+
+
+def _render_access_details(boarding, leg, *, steps_expander_label: str = "접근 경로 자세히 보기") -> None:
+    from services.route_detail_display import meaningful_route_steps, route_step_lines, mode_label
+
+    modes = {"BUS": "버스", "SUBWAY": "지하철", "WALKING": "도보",
+             "SAME_PLACE": "같은 장소", "ESTIMATED": "추정"}
+    estimated_access = is_estimated_access(leg)
+    if estimated_access:
+        st.write(f"접근 이동(추정): {leg.origin} → {leg.destination} · {format_minutes(leg.duration_minutes)}")
+        st.caption("실제 대중교통 경로가 아닙니다. 경로 API를 확인하지 못해 직선거리 기반 추정 시간을 사용합니다.")
+    else:
+        st.write(f"접근 이동: {leg.origin} → {leg.destination} · {format_minutes(leg.duration_minutes)}")
+        st.caption(" + ".join(modes.get(mode, mode) for mode in getattr(leg, "transport_modes", ()))
+                   + f" · 환승 {getattr(leg, 'transfers', 0)}회")
+    st.write(f"출발 가능 {leg.departure_time:%H:%M} → 거점 도착 {leg.arrival_time:%H:%M:%S}"
+             f" → 승차 준비 완료 {boarding.ready_time:%H:%M:%S}")
+    st.write(f"승차 버퍼 {format_minutes(boarding.buffer_minutes)} · 추가 대기 {format_minutes(boarding.waiting_minutes)}"
+             f" · 총 소요시간 {format_minutes(boarding.total_duration_minutes)}")
+    steps = meaningful_route_steps(getattr(leg, "steps", ()) or ())
+    if steps and not estimated_access:
+        with st.expander(steps_expander_label, expanded=False):
+            for step in steps:
+                # Keep distance in Access UI (existing card detail); Timeline omits it.
+                head = (f"{mode_label(step.mode)} · {format_minutes(step.duration_seconds / 60)}"
+                        f" · {step.distance_meters:g}m")
+                extras = route_step_lines(step)
+                # route_step_lines already starts with mode·time; prefer richer lines without dup head.
+                if len(extras) > 1 or (getattr(step, "line_name", "") or getattr(step, "start_name", "")):
+                    st.text(head)
+                    for line in extras[1:]:
+                        st.text(line)
+                else:
+                    guidance = (getattr(step, "guidance", "") or "").strip()
+                    st.text(f"{head} · {guidance}" if guidance else head)
+    elif estimated_access:
+        st.caption(getattr(leg, "note", "") or "추정 접근 시간")
 
 
 def render_transport_results() -> None:
@@ -374,13 +399,14 @@ def render_transport_results() -> None:
             render_candidate(candidate, number, selectable=True)
     if selected:
         st.subheader("선택한 교통편")
-        render_candidate(selected, 1, selectable=False)
+        render_candidate(selected, 1, selectable=False, compact=True)
         st.caption("운행정보 확인됨 · 좌석/매진 여부는 예매처에서 확인 필요")
         alternatives = [(n, c) for n, c in enumerate(result.candidates[:5], 1) if c != selected]
         if alternatives:
-            with st.expander(f"다른 추천 교통편 보기 ({len(alternatives)}개)", expanded=False):
+            with st.expander(f"다른 교통편 보기 ({len(alternatives)}개)", expanded=False):
                 for number, candidate in alternatives:
                     render_candidate(candidate, number, selectable=True)
+        render_accommodation_panel()
         render_place_results()
 
 
@@ -470,16 +496,30 @@ def _main_place_list_should_expand(selected) -> bool:
 
 
 def _render_main_place_section(result) -> None:
+    from services.schedule_day_view import simplify_category
     selected = _selected_main_candidate(result)
     if selected is not None and not _main_place_list_should_expand(selected):
         st.markdown("### 선택한 기준 장소")
         with st.container(border=True):
-            st.write(f"**{selected.place_name}**")
-            st.text(selected.category or "카테고리 정보 없음")
-            st.text(selected.address or "주소 정보 없음")
-            reason = place_reason(selected) or selected.ai_reason
-            if reason and "관련 검색에서 찾은 후보입니다" not in reason:
-                st.caption("추천 근거: " + reason)
+            st.write(f"**★ {selected.place_name}**")
+            category = simplify_category(selected.category or "") or (selected.category or "카테고리 정보 없음")
+            # Prefer short leaf path pieces after '>'
+            if ">" in category:
+                parts = [p.strip() for p in category.split(">") if p.strip()]
+                category = " · ".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
+            st.caption(category)
+            if selected.address:
+                st.caption(selected.address)
+            with st.expander("장소 상세", expanded=False):
+                if selected.category:
+                    st.text(selected.category)
+                if selected.phone:
+                    st.text(f"전화: {selected.phone}")
+                if selected.place_url:
+                    st.link_button("Kakao 장소 정보", selected.place_url)
+                reason = place_reason(selected) or selected.ai_reason
+                if reason and "관련 검색에서 찾은 후보입니다" not in reason:
+                    st.caption("추천 근거: " + reason)
         if st.button("다른 장소로 변경", key="expand_main_place_list"):
             st.session_state.main_place_list_expanded = True
             st.rerun()
@@ -545,6 +585,7 @@ def schedule_place_changed() -> None:
     st.session_state.pop("trip_schedule", None)
     st.session_state.pop("schedule_result", None)
     _clear_replan_state()
+    st.session_state.schedule_anchor_pending = True
 
 
 def render_schedule_items(items, previous) -> object:
@@ -580,10 +621,9 @@ def render_return_journey(schedule) -> None:
     if not schedule.return_journey:
         return
     journey = schedule.return_journey
-    st.subheader("돌아가는 길")
     if schedule.destination_activity_cutoff:
         cutoff = schedule.destination_activity_cutoff
-        st.caption(f"{cutoff:%m/%d} 목적지 활동 종료 권장 한도: {cutoff:%H:%M}")
+        st.caption(f"목적지 활동 종료 권장 한도: {cutoff:%H:%M}")
         st.caption("이 시간 이후에는 귀가 거점 이동·승차 준비·귀가 교통 때문에 새 활동을 추가하지 않습니다.")
     for leg in (journey.to_hub,):
         st.write(f"{leg.departure_time:%m/%d %H:%M} ~ {leg.arrival_time:%m/%d %H:%M} · {leg.origin} → {leg.destination}")
@@ -592,8 +632,12 @@ def render_return_journey(schedule) -> None:
     st.write(f"{transport.departure_time:%m/%d %H:%M} ~ {transport.arrival_time:%m/%d %H:%M} · {TRANSPORT_LABELS[transport.transport_type]} · {transport.departure_place} → {transport.arrival_place}")
     leg = journey.to_origin
     st.write(f"{leg.departure_time:%m/%d %H:%M} ~ {leg.arrival_time:%m/%d %H:%M} · {leg.origin} → {leg.destination}")
-    margin = (schedule.trip_end_datetime - schedule.final_arrival_datetime).total_seconds() / 60
-    st.success(f"귀가 완료 목표 {schedule.trip_end_datetime:%m/%d %H:%M} · 예상 귀가 {schedule.final_arrival_datetime:%m/%d %H:%M} · 남은 여유 {format_minutes(margin)}")
+    if schedule.final_arrival_datetime is not None:
+        margin = (schedule.trip_end_datetime - schedule.final_arrival_datetime).total_seconds() / 60
+        st.caption(
+            f"귀가 목표 {schedule.trip_end_datetime:%H:%M} · 예상 귀가 {schedule.final_arrival_datetime:%H:%M}"
+            f" · 남은 여유 {format_minutes(margin)}"
+        )
 
 
 def render_schedule_results() -> None:
@@ -686,8 +730,9 @@ def render_schedule_results() -> None:
         elif lodging_choice == "known" and not confirmed:
             can_generate = False
             st.caption("위쪽 [숙소]에서 숙소 위치를 확인한 뒤 일정을 생성해주세요.")
-    requested = st.button("여행 일정 생성", key="generate_schedule", disabled=not can_generate)
-    if (requested or st.session_state.pop("schedule_anchor_pending", False)) and can_generate:
+    pending_generate = bool(st.session_state.get("schedule_anchor_pending"))
+    if pending_generate and can_generate:
+        st.session_state.pop("schedule_anchor_pending", None)
         with st.spinner("장소 사이의 경로와 방문 가능한 시간을 확인하고 있습니다…"):
             result = generate_trip_schedule(
                 trip, selected, candidates, read_settings(), preferred,
@@ -700,6 +745,8 @@ def render_schedule_results() -> None:
         _clear_replan_state()
     result = st.session_state.get("schedule_result")
     if result is None:
+        if can_generate and not pending_generate:
+            st.info("일정을 생성할 수 없습니다. 이전 단계에서 여행 조건을 다시 확인해주세요.")
         return
     for notice in result.notices:
         # Avoid duplicating return-status warnings that render_return_journey shows.
@@ -881,7 +928,8 @@ def render_replan_panel(schedule, *, trip, selected, lodging_key, preferred, com
     )
     from services.replan_nl_parser import apply_parsed_replan
 
-    st.subheader("여행 중 일정 변경")
+    st.subheader("일정이 틀어졌나요?")
+    st.caption("완료한 일정은 유지하고 현재 상황에 맞춰 남은 일정만 다시 계산합니다.")
     if schedule is None or schedule.validation_status != "VALIDATED":
         st.info("먼저 여행 일정을 생성해주세요.")
         return
@@ -1070,14 +1118,20 @@ def render_replan_panel(schedule, *, trip, selected, lodging_key, preferred, com
                 st.rerun()
         return
 
+    st.markdown("**지금 상황을 알려주세요**")
+    examples = ("여기 문 닫았어", "시장 빼줘", "30분 늦었어", "너무 피곤해")
+    chip_cols = st.columns(len(examples))
+    for col, example in zip(chip_cols, examples):
+        if col.button(example, key=f"replan_chip_{example}"):
+            st.session_state.replan_input_area = example
+            st.session_state.replan_user_text = example
+            st.rerun()
     user_text = st.text_area(
         "현재 상황이나 바꾸고 싶은 내용을 입력하세요.",
-        value=st.session_state.get("replan_user_text") or "",
-        placeholder="예: 여기 문 닫았어 · 시장은 빼줘 · 30분 늦었어 · 너무 피곤해",
+        placeholder="예: 여기 문 닫았어 · 시장 빼줘 · 30분 늦었어 · 너무 피곤해",
         key="replan_input_area",
         height=80,
     )
-    st.caption("예: 여기 문 닫았어 · 시장은 빼줘 · 30분 늦었어 · 너무 피곤해")
 
     if st.button("일정 다시 계산", key="replan_compute", type="primary"):
         text = (user_text or "").strip()
@@ -1258,7 +1312,14 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
     st.set_page_config(page_title="여행 다시짜기", page_icon="🧳", layout="centered")
     st.title("여행 다시짜기")
-    st.caption("출발부터 귀가까지, 상황이 바뀌면 남은 일정만 다시 계산합니다.")
+    st.caption("실제 대중교통으로 출발부터 귀가까지, 상황이 바뀌면 남은 일정만 다시 계산합니다.")
+    c1, c2, c3 = st.columns(3)
+    c1.markdown("**실제 교통 기반**  \n실제 열차·버스·이동시간을 반영합니다.")
+    c2.markdown("**동선 기반 일정**  \n장소·숙소·귀가까지 한 흐름으로 계산합니다.")
+    c3.markdown("**여행 중 재계획**  \n완료한 일정은 유지하고 남은 일정만 다시 짭니다.")
+    st.info(
+        "예: “30분 늦었고 시장은 빼줘” → 완료한 일정은 유지하고 남은 일정만 재계산"
+    )
     settings = read_settings()
     render_trip_form()
     render_diagnostics(settings)

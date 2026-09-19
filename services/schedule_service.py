@@ -441,7 +441,8 @@ class ScheduleService:
             item_type="TRAVEL", place_id=end_point.id, place_name=end_point.name,
             start_datetime=start, end_datetime=end, origin=current, destination=end_point,
             travel_mode=tuple(dict.fromkeys(s.mode for s in route.steps)),
-            travel_duration_minutes=route.duration_seconds / 60, reason="숙소 이동")
+            travel_duration_minutes=route.duration_seconds / 60,
+            route_steps=route.steps, reason="숙소 이동")
         return list(items) + [travel]
 
     def _fill_gaps(self, trip, selected, arrival, items, routes, cache, available,
@@ -595,7 +596,8 @@ class ScheduleService:
                         replacement = following.model_copy(update={"origin": point,
                             "start_datetime": following.end_datetime - timedelta(seconds=route.duration_seconds),
                             "travel_duration_minutes": route.duration_seconds / 60,
-                            "travel_mode": tuple(dict.fromkeys(s.mode for s in route.steps))})
+                            "travel_mode": tuple(dict.fromkeys(s.mode for s in route.steps)),
+                            "route_steps": route.steps})
                     elif self.return_anchor is not None:
                         # Final-day trailing gap: candidate must still reach return hub before cutoff.
                         point = point_for(c)
@@ -719,7 +721,8 @@ class ScheduleService:
                 replacement = following.model_copy(update={
                     "origin": point, "start_datetime": depart,
                     "travel_duration_minutes": route.duration_seconds / 60,
-                    "travel_mode": tuple(dict.fromkeys(s.mode for s in route.steps))})
+                    "travel_mode": tuple(dict.fromkeys(s.mode for s in route.steps)),
+                    "route_steps": route.steps})
                 new_tail_start = end_idx + 2
             proposed = list(items[:start_idx]) + proposal + ([replacement] if replacement else []) + list(items[new_tail_start:])
             trial = TripSchedule(trip_start_datetime=selected.arrival_time,
@@ -827,7 +830,8 @@ class ScheduleService:
                 items.append(ScheduleItem(item_type="TRAVEL", place_id=c.place_id, place_name=c.place_name,
                     start_datetime=visit_start - timedelta(seconds=route.duration_seconds), end_datetime=visit_start,
                     origin=current, destination=target, travel_mode=tuple(dict.fromkeys(s.mode for s in route.steps)),
-                    travel_duration_minutes=route.duration_seconds / 60, reason="경로 API 예상 이동시간"))
+                    travel_duration_minutes=route.duration_seconds / 60, route_steps=route.steps,
+                    reason="경로 API 예상 이동시간"))
             checks = ["영업시간 확인 필요"]
             if trip.allergies and is_meal(c):
                 checks.append("알레르기 정보 확인 필요")

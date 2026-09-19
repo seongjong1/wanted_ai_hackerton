@@ -31,7 +31,7 @@ def test_local_origin_to_schedule_and_invalidation(monkeypatch, change):
     app.button[0].click().run()
     app.button(key="select_transport_1").click().run()
     app.button(key="search_nearby_places").click().run()
-    app.button(key="generate_schedule").click().run()
+    app.button(key=f"anchor_schedule_{values[0].place_id}").click().run()
     assert not app.exception
     assert app.session_state.trip_schedule.validation_status == "VALIDATED"
     assert app.session_state.trip_schedule.trip_start_datetime == app.session_state.selected_transport.arrival_time
@@ -47,7 +47,7 @@ def test_local_origin_to_schedule_and_invalidation(monkeypatch, change):
     else:
         app.button(key="search_additional_places").click().run()
     assert not app.exception
-    assert "trip_schedule" not in app.session_state
+    assert "trip_schedule" not in app.session_state or change == "place"
     if change == "place":
-        app.button(key="generate_schedule").click().run()
         assert app.session_state.trip_schedule.items[0].place_id == values[1].place_id
+        assert generate.call_count == 2
