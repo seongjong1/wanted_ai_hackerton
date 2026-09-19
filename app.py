@@ -11,8 +11,9 @@ from config import Settings, load_settings
 from models.trip_request import Preference, RADIUS_OPTIONS, TripRequest
 from services.health_service import check_connections
 from services.transport_service import search_transport
-from models.access import access_hub_label, is_estimated_access, is_trivial_same_place_access
+from models.access import is_estimated_access
 from models.transport import TransportCandidate, TransportType
+from services.access_display import access_hub_label, is_trivial_same_place_access
 from services.place_service import search_places_for_trip, place_reason, activity_radius_meters
 
 

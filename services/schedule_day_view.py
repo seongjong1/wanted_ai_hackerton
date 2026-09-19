@@ -10,11 +10,12 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from models.access import AccessPoint, access_hub_label, is_trivial_same_place_access
+from models.access import AccessPoint
 from models.place import PlaceCandidate
 from models.schedule import ReturnStatus, ScheduleItem, TripDaySchedule, TripSchedule
 from models.transport import TransportCandidate, TransportType
 from models.trip_request import TripRequest
+from services.access_display import access_hub_label, is_trivial_same_place_access
 
 TimelineKind = Literal[
     "ARRIVAL", "DEPARTURE", "DAY_START", "ACTIVITY", "TRAVEL", "FREE_TIME",

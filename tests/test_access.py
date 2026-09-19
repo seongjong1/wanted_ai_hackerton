@@ -4,9 +4,9 @@ import pytest
 from pydantic import ValidationError
 
 from models.access import (
-    AccessLeg, AccessPoint, BoardingAssessment,
-    access_hub_label, is_estimated_access, is_trivial_same_place_access,
+    AccessLeg, AccessPoint, BoardingAssessment, is_estimated_access,
 )
+from services.access_display import access_hub_label, is_trivial_same_place_access
 from models.transport import KST
 
 
