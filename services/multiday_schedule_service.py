@@ -34,7 +34,13 @@ def same_access_point(left: AccessPoint | None, right: AccessPoint | None) -> bo
 
 
 def is_multiday(trip) -> bool:
-    return bool(trip.has_accommodation and trip.end_date > trip.start_date)
+    """True when the trip spans more than one calendar day — lodging is required."""
+    return trip.end_date > trip.start_date
+
+
+def trip_night_count(trip) -> int:
+    """Number of overnight stays implied by the date range (0 for same-day)."""
+    return max(0, (trip.end_date - trip.start_date).days)
 
 
 def trip_dates(trip) -> list[date]:
@@ -130,6 +136,13 @@ def validate_multiday_reason(schedule, trip, accommodation) -> str:
         return "day_count"
     if schedule.accommodation is None or not same_access_point(schedule.accommodation, accommodation):
         return "accommodation_mismatch"
+    if not schedule.accommodation_status:
+        return "accommodation_status_missing"
+    expected_nights = trip_night_count(trip)
+    if len(schedule.accommodation_nights) != expected_nights:
+        return "night_count"
+    if expected_nights > 0 and not schedule.accommodation_nights:
+        return "accommodation_boundary_missing"
     if [d.date for d in schedule.days] != dates:
         return "date_mismatch"
     if schedule.days[0].role != "FIRST" or schedule.days[-1].role != "FINAL":
@@ -145,6 +158,10 @@ def validate_multiday_reason(schedule, trip, accommodation) -> str:
     for day in schedule.days[:-1]:
         if not same_access_point(day.end_location, accommodation):
             return "day_end_accommodation"
+    # No overnight gap inside a day disguised as schedule continuity
+    overnight = overnight_gap_in_days(schedule)
+    if overnight:
+        return "overnight_free_gap"
     visited = []
     for day in schedule.days:
         for item in day.items:
@@ -164,6 +181,27 @@ def validate_multiday_reason(schedule, trip, accommodation) -> str:
     if schedule.validation_status != "VALIDATED":
         return "not_validated"
     return ""
+
+
+def overnight_gap_in_days(schedule) -> bool:
+    """True when a day contains an item gap that crosses midnight (illegal overnight FREE_TIME)."""
+    if not schedule.days:
+        items = schedule.items
+        if not items:
+            return False
+        for earlier, later in zip(items, items[1:]):
+            if earlier.end_datetime.date() < later.start_datetime.date():
+                if (later.start_datetime - earlier.end_datetime).total_seconds() >= 4 * 3600:
+                    return True
+        return False
+    for day in schedule.days:
+        previous = None
+        for item in day.items:
+            if previous is not None and previous.end_datetime.date() < item.start_datetime.date():
+                if (item.start_datetime - previous.end_datetime).total_seconds() >= 4 * 3600:
+                    return True
+            previous = item
+    return False
 
 
 class MultidayScheduleService:

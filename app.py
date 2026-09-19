@@ -34,7 +34,12 @@ def render_trip_form() -> None:
         end_date = right.date_input("여행 종료 날짜", value=today)
         departure_time = left.time_input("출발 희망 시간", value=time(9))
         end_time = right.time_input("귀가 완료 목표 시간", value=time(20))
-        has_accommodation = st.checkbox("숙박 예정")
+        # Multi-day (end_date > start_date) always requires overnight lodging.
+        # Same-day trips never need an accommodation section.
+        if end_date > start_date:
+            st.caption("1박 이상 여행입니다. 숙소는 아래에서 정함/미정만 선택합니다.")
+        else:
+            st.caption("당일 여행 · 숙소 선택이 필요하지 않습니다.")
         st.caption("국내 여행 · 모든 날짜와 시간은 한국 시각 기준입니다.")
 
         st.subheader("동행 및 조건")
@@ -55,6 +60,7 @@ def render_trip_form() -> None:
         for key in ("trip_request", "transport_result", "transport_candidates", "selected_transport",
                     "place_result", "place_candidates", "place_anchor", "nearby_result", "trip_schedule",
                     "schedule_result", "schedule_preferred_place_id", "user_selected_place_id",
+                    "main_place_list_expanded",
                     "schedule_anchor_pending", "origin_address_input", "origin_address_error",
                     "accommodation_query", "accommodation_choice", "accommodation_point",
                     "accommodation_error", "accommodation_resolved_query", "provisional_hub_name",
@@ -69,7 +75,7 @@ def render_trip_form() -> None:
             trip = TripRequest(
                 departure=departure, destination=destination, start_date=start_date,
                 end_date=end_date, departure_time=departure_time, end_time=end_time,
-                has_accommodation=has_accommodation, allergies=tuple(allergies.split(",")),
+                has_accommodation=(end_date > start_date), allergies=tuple(allergies.split(",")),
                 has_pet=has_pet, has_child=has_child, activity_radius=activity_radius,
                 preferences=tuple(preferences),
             )
@@ -145,9 +151,11 @@ def _ensure_accommodation_recommendations() -> None:
 
 def render_accommodation_panel() -> None:
     trip = st.session_state.trip_request
-    if not (trip.has_accommodation and trip.end_date > trip.start_date):
+    from services.multiday_schedule_service import is_multiday
+    if not is_multiday(trip):
         return
     st.subheader("숙소")
+    st.caption("1박 이상 여행은 숙박이 필요합니다. 숙소를 정했는지 여부만 선택하세요.")
     choice = st.radio(
         "숙소는 정하셨나요?",
         ("숙소를 정했어요", "아직 숙소를 정하지 않았어요"),
@@ -334,7 +342,7 @@ def render_candidate(candidate: TransportCandidate, number: int, *, selectable: 
         if candidate.train_number:
             st.caption(f"열차 번호 {candidate.train_number}")
         if selectable and st.button("이 교통편 선택", key=f"select_transport_{number}"):
-            for key in ("place_result", "place_candidates", "place_anchor", "nearby_result", "trip_schedule", "schedule_result", "schedule_preferred_place_id", "user_selected_place_id", "schedule_anchor_pending", "origin_address_input", "origin_address_error"):
+            for key in ("place_result", "place_candidates", "place_anchor", "nearby_result", "trip_schedule", "schedule_result", "schedule_preferred_place_id", "user_selected_place_id", "main_place_list_expanded", "schedule_anchor_pending", "origin_address_input", "origin_address_error"):
                 st.session_state.pop(key, None)
             st.session_state.selected_transport = candidate
             for key in ("schedule_signature", "nearby_point_choice"):
@@ -389,17 +397,29 @@ def render_place_results() -> None:
         _clear_replan_state()
         st.session_state.place_result = result
         st.session_state.place_candidates = result.candidates
+        # Fresh candidate set: keep MAIN only if it still exists; otherwise expand list.
+        selected_id = st.session_state.get("user_selected_place_id")
+        ids = {c.place_id for c in result.candidates}
+        if selected_id and selected_id not in ids:
+            st.session_state.pop("user_selected_place_id", None)
+            st.session_state.pop("schedule_preferred_place_id", None)
+            st.session_state.main_place_list_expanded = True
+        elif not selected_id:
+            st.session_state.main_place_list_expanded = True
         st.rerun()
     result = st.session_state.get("place_result")
     if result is None:
         return
     if result.destination_scope:
         st.subheader(f"{result.destination_scope} 주요 추천 장소")
+        for notice in result.notices:
+            st.info(notice)
+        _render_main_place_section(result)
     else:
         st.write(f"**{result.anchor.name if result.anchor else '기준점 미확인'} 주변 · {result.status}**")
-    for notice in result.notices:
-        st.info(notice)
-    render_place_cards(result, allow_anchor=True)
+        for notice in result.notices:
+            st.info(notice)
+        render_place_cards(result, allow_anchor=True)
     if result.destination_scope:
         from models.access import AccessPoint
         points = {c.place_id: AccessPoint(id=c.place_id, name=c.place_name, x=c.longitude, y=c.latitude)
@@ -427,6 +447,40 @@ def render_place_results() -> None:
                     render_place_cards(nearby)
 
     render_schedule_results()
+
+
+def _selected_main_candidate(result):
+    selected_id = st.session_state.get("user_selected_place_id")
+    if not selected_id:
+        return None
+    return next((c for c in result.candidates if c.place_id == selected_id), None)
+
+
+def _main_place_list_should_expand(selected) -> bool:
+    """Collapse only after an explicit MAIN pick; expand when changing or unset."""
+    if selected is None:
+        return True
+    return bool(st.session_state.get("main_place_list_expanded"))
+
+
+def _render_main_place_section(result) -> None:
+    selected = _selected_main_candidate(result)
+    if selected is not None and not _main_place_list_should_expand(selected):
+        st.markdown("### 선택한 기준 장소")
+        with st.container(border=True):
+            st.write(f"**{selected.place_name}**")
+            st.text(selected.category or "카테고리 정보 없음")
+            st.text(selected.address or "주소 정보 없음")
+            reason = place_reason(selected) or selected.ai_reason
+            if reason and "관련 검색에서 찾은 후보입니다" not in reason:
+                st.caption("추천 근거: " + reason)
+        if st.button("다른 장소로 변경", key="expand_main_place_list"):
+            st.session_state.main_place_list_expanded = True
+            st.rerun()
+        return
+    if selected is not None:
+        st.caption(f"현재 기준 장소: {selected.place_name} · 아래에서 다른 장소를 선택할 수 있습니다.")
+    render_place_cards(result, allow_anchor=True)
 
 
 def render_place_cards(result, *, show_all: bool = False, allow_anchor: bool = False) -> None:
@@ -470,6 +524,7 @@ def render_place_cards(result, *, show_all: bool = False, allow_anchor: bool = F
                 if st.button("이 장소 중심으로 일정 만들기", key=f"anchor_schedule_{candidate.place_id}"):
                     st.session_state.user_selected_place_id = candidate.place_id
                     st.session_state.schedule_preferred_place_id = candidate.place_id
+                    st.session_state.main_place_list_expanded = False
                     for key in ("trip_schedule", "schedule_result", "schedule_signature", "nearby_result"):
                         st.session_state.pop(key, None)
                     _clear_replan_state()
@@ -480,6 +535,7 @@ def render_place_cards(result, *, show_all: bool = False, allow_anchor: bool = F
 def schedule_place_changed() -> None:
     st.session_state.pop("user_selected_place_id", None)
     st.session_state.schedule_preferred_place_id = st.session_state.get("nearby_point_choice")
+    st.session_state.main_place_list_expanded = True
     st.session_state.pop("trip_schedule", None)
     st.session_state.pop("schedule_result", None)
     _clear_replan_state()
@@ -536,7 +592,7 @@ def render_return_journey(schedule) -> None:
 
 def render_schedule_results() -> None:
     from services.schedule_service import generate_trip_schedule
-    from services.multiday_schedule_service import arrival_hub_query
+    from services.multiday_schedule_service import arrival_hub_query, is_multiday
     import hashlib
     trip = st.session_state.trip_request
     selected = st.session_state.selected_transport
@@ -615,7 +671,7 @@ def render_schedule_results() -> None:
         st.caption("체류시간은 기본 추정값입니다. 영업시간과 실제 배차·지연은 방문 전에 확인해주세요.")
         if undecided:
             st.caption("숙소를 선택하지 않으면 도착 거점을 임시 기준점으로 사용하며, 추천 숙소 또는 직접 입력 숙소를 확인하면 전체 일정을 다시 계산합니다.")
-    multiday = trip.has_accommodation and trip.end_date > trip.start_date
+    multiday = is_multiday(trip)
     can_generate = True
     if multiday:
         if lodging_choice is None:

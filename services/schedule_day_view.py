@@ -272,6 +272,93 @@ def build_outbound_timeline(selected: TransportCandidate | None) -> list[Timelin
     return events
 
 
+def _transport_label(selected: TransportCandidate) -> str:
+    return TRAVEL_MODE_LABELS.get(
+        selected.transport_type.value if isinstance(selected.transport_type, TransportType)
+        else str(selected.transport_type),
+        selected.transport_type.value if hasattr(selected.transport_type, "value") else "교통편",
+    )
+
+
+def _arrival_names_align(arrival_place: str, hub_name: str) -> bool:
+    """True when transport arrival label and hub name describe the same stop/region."""
+    a = (arrival_place or "").strip()
+    h = (hub_name or "").strip()
+    if not a or not h:
+        return False
+    if a == h:
+        return True
+    # Region label ("구미") vs hub POI ("구미종합터미널", "구미역")
+    if a in h or h.startswith(a):
+        return True
+    return False
+
+
+def _same_physical_arrival(
+        *,
+        selected: TransportCandidate,
+        start_point: AccessPoint,
+        activity_start: datetime,
+        arrival_point: AccessPoint | None,
+) -> bool:
+    """Merge only when day starts at the transport arrival hub at the same instant."""
+    if selected.arrival_time != activity_start:
+        return False
+    if arrival_point is not None and arrival_point.id != start_point.id:
+        return False
+    return _arrival_names_align(selected.arrival_place, start_point.name)
+
+
+def merge_destination_hub_arrivals(
+        timeline: list[TimelineEvent],
+        *,
+        selected: TransportCandidate | None,
+        start_point: AccessPoint | None,
+        activity_start: datetime,
+        arrival_point: AccessPoint | None,
+) -> list[TimelineEvent]:
+    """Collapse duplicate DESTINATION_ARRIVAL + HUB_ARRIVAL into one hub event.
+
+    Visualization-only. Keeps both when transport hub ≠ day start location.
+    """
+    if selected is None or start_point is None:
+        return timeline
+    if not _same_physical_arrival(
+            selected=selected,
+            start_point=start_point,
+            activity_start=activity_start,
+            arrival_point=arrival_point):
+        return timeline
+
+    arrival_indexes = [
+        i for i, event in enumerate(timeline)
+        if event.kind == "ARRIVAL" and event.start == activity_start
+    ]
+    if len(arrival_indexes) < 2:
+        return timeline
+
+    label = _transport_label(selected)
+    region = selected.arrival_place.strip() if selected.arrival_place else ""
+    detail = f"{label} 도착"
+    if region and region not in start_point.name:
+        detail = f"{label} 도착 · {region} 여행 시작"
+    elif region:
+        detail = f"{label} 도착 · 여행 시작"
+    merged = TimelineEvent(
+        kind="ARRIVAL",
+        start=activity_start,
+        end=None,
+        title=f"{start_point.name} 도착",
+        detail=detail,
+        place_id=start_point.id,
+    )
+    first_i = arrival_indexes[0]
+    drop = set(arrival_indexes)
+    result = [event for i, event in enumerate(timeline) if i not in drop]
+    result.insert(first_i, merged)
+    return result
+
+
 def build_day_view(
         schedule: TripSchedule,
         day: TripDaySchedule | None,
@@ -325,6 +412,13 @@ def build_day_view(
             title=f"{start_point.name} 도착",
             detail="DAY 일정 시작" if role == "FIRST" else "일정 시작",
             place_id=start_point.id))
+        timeline = merge_destination_hub_arrivals(
+            timeline,
+            selected=selected,
+            start_point=start_point,
+            activity_start=activity_start,
+            arrival_point=schedule.arrival_point,
+        )
         _add_marker(markers, role="ARRIVAL_HUB", point=start_point)
         _append_path(path_sequence, role="START", point=start_point)
     else:
@@ -357,13 +451,20 @@ def build_day_view(
     previous = activity_start
     for index, item in enumerate(items):
         if item.start_datetime > previous:
-            gap = (item.start_datetime - previous).total_seconds() / 60
-            timeline.append(TimelineEvent(
-                kind="FREE_TIME", start=previous, end=item.start_datetime,
-                title=f"자유시간 · {int(round(gap))}분",
-                detail=_free_time_detail(
-                    at_lodging=awaiting_first_departure,
-                    provisional=status == "PROVISIONAL")))
+            # Overnight gaps belong to day boundaries (lodging), never FREE_TIME.
+            crosses_midnight = previous.date() < item.start_datetime.date()
+            long_overnight = (
+                crosses_midnight
+                and (item.start_datetime - previous).total_seconds() >= 4 * 3600
+            )
+            if not long_overnight:
+                gap = (item.start_datetime - previous).total_seconds() / 60
+                timeline.append(TimelineEvent(
+                    kind="FREE_TIME", start=previous, end=item.start_datetime,
+                    title=f"자유시간 · {int(round(gap))}분",
+                    detail=_free_time_detail(
+                        at_lodging=awaiting_first_departure,
+                        provisional=status == "PROVISIONAL")))
         if item.item_type == "TRAVEL":
             origin_name = item.origin.name if item.origin else ""
             dest_name = item.destination.name if item.destination else item.place_name
@@ -486,10 +587,16 @@ def build_day_view(
             _append_path(path_sequence, role="END", point=lodge)
 
     # Summary lines from existing times only.
+    # Day Summary keeps regional destination wording; Timeline uses hub POI.
     visits = sum(1 for i in items if i.item_type != "TRAVEL")
     summary_lines: list[str] = []
     if role in {"FIRST", "SINGLE"}:
-        summary_lines.append(f"{activity_start:%H:%M} {start_point.name} 도착")
+        region = (
+            selected.arrival_place.strip()
+            if selected is not None and selected.arrival_place
+            else start_point.name
+        )
+        summary_lines.append(f"{activity_start:%H:%M} {region} 도착")
     else:
         base = overnight_start or start_point
         summary_lines.append(f"{activity_start:%H:%M} 일정 시작 · {base.name}")

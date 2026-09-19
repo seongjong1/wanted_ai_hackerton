@@ -89,9 +89,23 @@ def multiday_service(trip, selected, anchor, *, return_on_end_date=True, fail_re
     return ReturnScheduleService(activity, transport, access), transport, home, stay, back, hub
 
 
-def test_is_multiday_requires_accommodation_and_range(trip):
+def test_is_multiday_by_date_range_only(trip):
+    """Multi-day is date-driven; lodging flag is forced True on TripRequest construction."""
     assert not is_multiday(trip)
+    # Same calendar day even with has_accommodation=True is still same-day
     assert not is_multiday(trip.model_copy(update={"has_accommodation": True}))
+    # Date span alone makes multi-day; constructor forces has_accommodation=True
+    from models.trip_request import TripRequest
+    spanned = TripRequest(
+        departure=trip.departure, destination=trip.destination,
+        start_date=trip.start_date, end_date=trip.start_date + timedelta(days=1),
+        departure_time=trip.departure_time, end_time=time(20),
+        has_accommodation=False, allergies=(), has_pet=False, has_child=False,
+        activity_radius=trip.activity_radius,
+        preferences=(Preference.FOOD, Preference.SIGHTSEEING),
+    )
+    assert spanned.has_accommodation is True
+    assert is_multiday(spanned)
     assert is_multiday(multiday_trip(trip))
 
 
@@ -233,7 +247,9 @@ def test_validate_multiday_accepts_provisional_separate_hub_objects(trip):
         trip_start_datetime=days[0].activity_start,
         trip_end_datetime=datetime.combine(request.end_date, request.end_time, KST),
         arrival_point=hub, items=(), days=days, accommodation=hub,
-        accommodation_status="PROVISIONAL", return_status=ReturnStatus.RETURN_NONE,
+        accommodation_status="PROVISIONAL",
+        accommodation_nights=(hub, hub),
+        return_status=ReturnStatus.RETURN_NONE,
         validation_status="VALIDATED")
     assert validate_multiday_reason(schedule, request, hub_copy) == ""
     assert validate_multiday(schedule, request, hub_copy)
@@ -380,11 +396,10 @@ def test_ui_lodging_choice_and_no_duplicate_warning(monkeypatch):
     app.text_input[0].set_value(request.departure)
     app.text_input[1].set_value(request.destination)
     app.date_input[1].set_value(request.end_date)
-    app.checkbox[0].set_value(True)
     app.multiselect[0].set_value(["맛집", "관광"])
     app.button[0].click().run()
     assert "숙소" in [s.value for s in app.subheader]
-    # Same-day trip form had no lodging panel before checkbox+end date; after submit panel appears.
+    # Multi-day date range shows lodging panel (known vs undecided) without a separate overnight checkbox.
     app.radio(key="accommodation_choice_radio").set_value("숙소를 정했어요").run()
     lodging_inputs = [i for i in app.text_input if "숙소명 또는 주소" in (i.label or "")]
     assert lodging_inputs
@@ -479,7 +494,6 @@ def test_ui_provisional_then_confirm_stales(monkeypatch):
     app.text_input[0].set_value(request.departure)
     app.text_input[1].set_value(request.destination)
     app.date_input[1].set_value(request.end_date)
-    app.checkbox[0].set_value(True)
     app.multiselect[0].set_value(["맛집", "관광"])
     app.button[0].click().run()
     app.radio(key="accommodation_choice_radio").set_value("아직 숙소를 정하지 않았어요").run()
@@ -572,7 +586,6 @@ def test_ui_recommend_select_confirms_and_stales(monkeypatch):
     app.text_input[0].set_value(request.departure)
     app.text_input[1].set_value(request.destination)
     app.date_input[1].set_value(request.end_date)
-    app.checkbox[0].set_value(True)
     app.multiselect[0].set_value(["맛집", "관광"])
     app.button[0].click().run()
     app.radio(key="accommodation_choice_radio").set_value("아직 숙소를 정하지 않았어요").run()
@@ -666,7 +679,6 @@ def test_ui_return_only_on_final_day_and_seat_copy(monkeypatch):
     app.text_input[0].set_value(request.departure)
     app.text_input[1].set_value(request.destination)
     app.date_input[1].set_value(request.end_date)
-    app.checkbox[0].set_value(True)
     app.multiselect[0].set_value(["맛집", "관광"])
     app.button[0].click().run()
     app.radio(key="accommodation_choice_radio").set_value("아직 숙소를 정하지 않았어요").run()

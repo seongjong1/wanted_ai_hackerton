@@ -363,3 +363,99 @@ def test_case19_20_21_no_api_imports_in_day_view():
     assert "Tago" not in source
     assert "request_json" not in source
     assert "HttpClient" not in source
+
+
+def _outbound_selected(*, arrival_place="구미", arrival_hhmm=(13, 25), kind=TransportType.EXPRESS_BUS):
+    from services.transport_service import convert_candidate
+    base = convert_candidate(
+        {"depplacename": "서울", "arrplacename": arrival_place,
+         "depplandtime": "20260918102500",
+         "arrplandtime": f"20260918{arrival_hhmm[0]:02d}{arrival_hhmm[1]:02d}00"},
+        TransportType.TRAIN,
+    )
+    return base.model_copy(update={
+        "transport_type": kind,
+        "departure_place": "서울경부",
+        "arrival_place": arrival_place,
+    })
+
+
+def test_arrival_case1_merge_terminal_hub():
+    """CASE 1 — 서울경부 → 구미종합터미널: Timeline ARRIVAL 1개 (허브명)."""
+    schedule = multiday_schedule()
+    selected = _outbound_selected(arrival_place="구미", arrival_hhmm=(13, 25))
+    view = build_schedule_views(schedule, selected=selected)[0]
+    arrivals = [e for e in view.timeline if e.kind == "ARRIVAL"
+                and e.start == schedule.days[0].activity_start]
+    assert len(arrivals) == 1
+    assert arrivals[0].title == "구미종합터미널 도착"
+    assert "목적지 도착" not in arrivals[0].detail
+    assert "DAY 일정 시작" not in arrivals[0].detail
+    assert "구미종합터미널" in arrivals[0].title
+    # Following travel to first place still present
+    assert any(e.kind == "TRAVEL" for e in view.timeline)
+
+
+def test_arrival_case2_merge_station_hub():
+    """CASE 2 — 서울 → 구미역: Timeline shows 구미역 도착 once."""
+    schedule = multiday_schedule()
+    station = _point("hub", "구미역", 128.33, 36.12)
+    day0 = schedule.days[0].model_copy(update={"start_location": station})
+    schedule = schedule.model_copy(update={
+        "days": (day0, schedule.days[1], schedule.days[2]),
+        "arrival_point": station,
+    })
+    selected = _outbound_selected(arrival_place="구미역", arrival_hhmm=(13, 25),
+                                  kind=TransportType.TRAIN)
+    view = build_schedule_views(schedule, selected=selected)[0]
+    arrivals = [e for e in view.timeline if e.kind == "ARRIVAL"
+                and e.start == day0.activity_start]
+    assert len(arrivals) == 1
+    assert arrivals[0].title == "구미역 도착"
+
+
+def test_arrival_case3_day_summary_keeps_region():
+    """CASE 3 — Day Summary keeps regional '구미 도착'."""
+    schedule = multiday_schedule()
+    selected = _outbound_selected(arrival_place="구미", arrival_hhmm=(13, 25))
+    view = build_schedule_views(schedule, selected=selected)[0]
+    assert view.summary.lines[0] == "13:25 구미 도착"
+
+
+def test_arrival_case4_different_hub_and_day_start_not_merged():
+    """CASE 4 — Transport hub ≠ day start → do not merge; travel kept."""
+    schedule = multiday_schedule()
+    terminal = schedule.arrival_point  # 구미종합터미널
+    other = _point("other-base", "구미 시청", 128.34, 36.13)
+    # Day starts at a different base; first travel from other-base
+    day0 = schedule.days[0]
+    items = list(day0.items)
+    items[0] = items[0].model_copy(update={"origin": other})
+    day0 = day0.model_copy(update={"start_location": other, "items": tuple(items)})
+    schedule = schedule.model_copy(update={
+        "days": (day0, schedule.days[1], schedule.days[2]),
+        "arrival_point": terminal,
+    })
+    selected = _outbound_selected(arrival_place="구미", arrival_hhmm=(13, 25))
+    view = build_schedule_views(schedule, selected=selected)[0]
+    arrivals = [e for e in view.timeline if e.kind == "ARRIVAL"
+                and e.start == day0.activity_start]
+    # Different physical bases → keep destination + day-start arrivals
+    assert len(arrivals) >= 2
+    titles = {e.title for e in arrivals}
+    assert any("구미" in t for t in titles)
+    assert any("구미 시청" in t for t in titles)
+    assert any(e.kind == "TRAVEL" for e in view.timeline)
+
+
+def test_arrival_case5_map_return_replan_regression(selected):
+    """CASE 5 — existing map / return / day isolation still pass smoke checks."""
+    schedule = multiday_schedule()
+    views = build_schedule_views(schedule, selected=selected)
+    assert len(views) == 3
+    assert views[0].markers
+    assert views[2].return_summary is not None
+    assert any(e.kind == "RETURN_HUB" for e in views[2].timeline)
+    from services.schedule_map import build_day_deck
+    deck = build_day_deck(views[0])
+    assert hasattr(deck, "layers") or deck is not None

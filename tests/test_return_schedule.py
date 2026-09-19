@@ -149,13 +149,21 @@ def test_main_card_click_rebuilds_anchor_schedule(monkeypatch):
     app.button[0].click().run()
     app.button(key="select_transport_1").click().run()
     app.button(key="search_nearby_places").click().run()
-    for identifier in ("0", "1"):
-        app.session_state.trip_schedule = "stale"
-        app.button(key=f"anchor_schedule_{identifier}").click().run()
-        assert app.session_state.user_selected_place_id == identifier
-        assert generate.call_args.args[4] == identifier
-        assert app.session_state.trip_schedule is None
-        assert "nearby_result" not in app.session_state
+    app.session_state.trip_schedule = "stale"
+    app.button(key="anchor_schedule_0").click().run()
+    assert app.session_state.user_selected_place_id == "0"
+    assert app.session_state.main_place_list_expanded is False
+    assert generate.call_args.args[4] == "0"
+    assert app.session_state.trip_schedule is None
+    # List collapsed — reopen to pick another MAIN
+    app.button(key="expand_main_place_list").click().run()
+    assert app.session_state.main_place_list_expanded is True
+    app.session_state.trip_schedule = "stale"
+    app.button(key="anchor_schedule_1").click().run()
+    assert app.session_state.user_selected_place_id == "1"
+    assert app.session_state.main_place_list_expanded is False
+    assert generate.call_args.args[4] == "1"
+    assert "nearby_result" not in app.session_state
     app.run()
     assert generate.call_count == 2 and not app.exception
 

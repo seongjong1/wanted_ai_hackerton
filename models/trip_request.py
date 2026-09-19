@@ -46,6 +46,17 @@ class TripRequest(BaseModel):
             raise ValueError("알레르기는 항목당 100자, 최대 30개까지 입력하세요.")
         return cleaned
 
+    @model_validator(mode="before")
+    @classmethod
+    def force_multiday_accommodation(cls, data):
+        """Multi-day date range always implies overnight lodging is required."""
+        if isinstance(data, dict):
+            start = data.get("start_date")
+            end = data.get("end_date")
+            if start is not None and end is not None and end > start:
+                data = {**data, "has_accommodation": True}
+        return data
+
     @model_validator(mode="after")
     def validate_trip(self) -> Self:
         normalize = lambda text: "".join(text.split()).casefold()

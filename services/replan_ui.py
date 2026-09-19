@@ -331,6 +331,16 @@ def compute_replan_diff(
         diffs.append(ReplanDiffItem(
             DiffKind.RETURN_CHANGED, "return", "귀가",
             f"{_fmt_dt(original.final_arrival_datetime)} → {_fmt_dt(proposed.final_arrival_datetime)}"))
+    else:
+        oj, pj = original.return_journey, proposed.return_journey
+        if oj and pj:
+            o_id = oj.to_hub.origin_point.id if oj.to_hub.origin_point else oj.to_hub.origin
+            p_id = pj.to_hub.origin_point.id if pj.to_hub.origin_point else pj.to_hub.origin
+            if (o_id != p_id
+                    or oj.to_hub.departure_time != pj.to_hub.departure_time):
+                diffs.append(ReplanDiffItem(
+                    DiffKind.RETURN_CHANGED, "return", "귀가 접근",
+                    f"{oj.to_hub.origin} → {pj.to_hub.origin}"))
     if (original.accommodation and proposed.accommodation
             and original.accommodation.id != proposed.accommodation.id):
         diffs.append(ReplanDiffItem(

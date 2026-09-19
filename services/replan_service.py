@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 
 from config import ScheduleSettings, Settings
-from models.access import AccessPoint
+from models.access import AccessLeg, AccessPoint
 from models.replan import (
     ItemProgress,
     LocationStatus,
@@ -18,7 +18,7 @@ from models.replan import (
     ReplanStatus,
     item_key,
 )
-from models.schedule import ScheduleItem, TripDaySchedule, TripSchedule
+from models.schedule import ReturnJourney, ScheduleItem, TripDaySchedule, TripSchedule
 from services.replan_validate import validate_replan, _flat_items
 
 logger = logging.getLogger("travel_ai.replan")
@@ -274,6 +274,25 @@ def _activity_cutoff(schedule: TripSchedule, day: TripDaySchedule | None) -> dat
     return schedule.trip_end_datetime
 
 
+def _return_feasible_from(
+        point: AccessPoint,
+        end_time: datetime,
+        schedule: TripSchedule,
+        resolve_route=None,
+) -> bool:
+    """True when end_time + hub access + boarding buffer fits preserved return transport."""
+    journey = schedule.return_journey
+    if journey is None:
+        return True
+    hub = journey.to_hub.destination_point
+    if hub is None:
+        return True
+    minutes, _ = _estimate_travel_minutes(point, hub, schedule, resolve_route)
+    arrive_hub = end_time + timedelta(minutes=max(minutes, 0.0))
+    ready = arrive_hub + timedelta(minutes=journey.boarding_buffer_minutes)
+    return ready <= journey.transport.departure_time
+
+
 def _is_lodging_travel(item: ScheduleItem, schedule: TripSchedule) -> bool:
     if item.item_type != "TRAVEL":
         return False
@@ -368,9 +387,11 @@ def _access_point_for_visit(
         schedule: TripSchedule,
         pool_by_id: dict[str, AccessPoint],
 ) -> AccessPoint | None:
-    if item.destination is not None and item.item_type != "TRAVEL":
-        # rare
-        pass
+    if item.item_type != "TRAVEL":
+        if item.destination is not None and item.destination.id == item.place_id:
+            return item.destination
+        if item.origin is not None and item.origin.id == item.place_id:
+            return item.origin
     for other in _flat_items(schedule):
         if other.item_type != "TRAVEL":
             continue
@@ -604,6 +625,13 @@ def _chain_visits(
             if main_id and visit.place_id == main_id:
                 main_status = "INFEASIBLE"
             return False
+        # Final-day return: activity end + hub access + buffer must fit train
+        if ((day is None or day.role == "FINAL")
+                and not _return_feasible_from(
+                    point, new_visit.end_datetime, schedule, resolve_route)):
+            if main_id and visit.place_id == main_id:
+                main_status = "INFEASIBLE"
+            return False
         if travel is not None:
             built.append(travel)
             added.append(travel)
@@ -635,10 +663,21 @@ def _chain_visits(
                 preference_boost=effects.preference_changes,
                 fatigue=False,
             )
+            main_protected = (
+                bool(main_id)
+                and main_id not in exclude_ids
+                and main_status not in {"REJECTED_BY_USER"}
+                and not effects.reject_main
+            )
             inserted = 0
             for cand in ranked:
                 if inserted >= limit:
                     break
+                cat = getattr(cand, "category", "") or ""
+                is_meal = "음식" in cat or "식당" in cat or "카페" in cat
+                # Do not silently replace selected MAIN with another restaurant
+                if is_meal and main_protected and cand.place_id != main_id:
+                    continue
                 point = pool_points.get(cand.place_id) or _candidate_point(cand)
                 travel = _make_travel(
                     cursor_point, point, cursor_time, schedule, resolve_route=resolve_route)
@@ -648,6 +687,10 @@ def _chain_visits(
                     continue
                 # Leave buffer before lodging/return
                 if (cutoff - synth.end_datetime).total_seconds() / 60 < 15 and day and day.role != "FINAL":
+                    continue
+                if ((day is None or day.role == "FINAL")
+                        and not _return_feasible_from(
+                            point, synth.end_datetime, schedule, resolve_route)):
                     continue
                 if travel is not None:
                     built.append(travel)
@@ -802,6 +845,26 @@ def _rebuild_attempt(
         main_status = "REJECTED_BY_USER"
 
     proposed = _assemble_schedule(schedule, ordered, main_status)
+    proposed, return_ok = sync_final_day_return(
+        proposed, schedule, resolve_route=resolve_route)
+    if not return_ok or proposed is None:
+        return None, removed, added, main_status
+
+    # Track activities dropped by return sync strip
+    synced_visit_ids = {
+        i.place_id for i in _flat_items(proposed) if i.item_type != "TRAVEL"
+    }
+    for item in ordered:
+        if item.item_type != "TRAVEL" and item.place_id not in synced_visit_ids:
+            if item not in removed:
+                removed.append(item)
+
+    main_status = _finalize_main_status(schedule, proposed, effects, main_status)
+    if main_status == "INFEASIBLE":
+        proposed = proposed.model_copy(update={
+            "anchor_status": "INFEASIBLE",
+            "user_selected_place_id": schedule.user_selected_place_id,
+        })
     return proposed, removed, added, main_status
 
 
@@ -814,6 +877,204 @@ def _day_for_item(schedule: TripSchedule, item: ScheduleItem) -> TripDaySchedule
         if day.date == item.start_datetime.date():
             return day
     return None
+
+
+def _last_activity_point(
+        schedule: TripSchedule,
+) -> tuple[AccessPoint | None, datetime | None, ScheduleItem | None]:
+    """Last non-TRAVEL activity on the final day (or flat items)."""
+    items: tuple[ScheduleItem, ...]
+    if schedule.days:
+        final = next((d for d in reversed(schedule.days) if d.role == "FINAL"), schedule.days[-1])
+        items = final.items
+    else:
+        items = schedule.items
+    last_visit = None
+    for item in reversed(items):
+        if item.item_type != "TRAVEL":
+            last_visit = item
+            break
+    if last_visit is None:
+        # No activity — use day start / accommodation / arrival
+        if schedule.days:
+            final = next((d for d in reversed(schedule.days) if d.role == "FINAL"), schedule.days[-1])
+            point = final.start_location or schedule.accommodation or schedule.arrival_point
+            start = final.activity_start
+            return point, start, None
+        return schedule.accommodation or schedule.arrival_point, schedule.trip_start_datetime, None
+    point = _access_point_for_visit(last_visit, schedule, {})
+    return point, last_visit.end_datetime, last_visit
+
+
+def _build_return_access_leg(
+        origin: AccessPoint,
+        hub: AccessPoint,
+        departure: datetime,
+        schedule: TripSchedule,
+        *,
+        resolve_route=None,
+        old_leg: AccessLeg | None = None,
+) -> AccessLeg:
+    """Destination-side return access: last activity → return hub."""
+    if (old_leg and old_leg.origin_point and old_leg.destination_point
+            and old_leg.origin_point.id == origin.id
+            and old_leg.destination_point.id == hub.id):
+        return old_leg.model_copy(update={"departure_time": departure})
+    minutes, modes = _estimate_travel_minutes(origin, hub, schedule, resolve_route)
+    if minutes <= 0:
+        minutes = 1.0
+    return AccessLeg(
+        origin=origin.name,
+        destination=hub.name,
+        transport_modes=modes or ("BUS",),
+        duration_minutes=minutes,
+        departure_time=departure,
+        provider="REPLAN",
+        origin_point=origin,
+        destination_point=hub,
+        estimated="ESTIMATED" in (modes or ()),
+        note="재계획 귀가 접근",
+    )
+
+
+def _return_boarding_ok(leg: AccessLeg, journey: ReturnJourney) -> bool:
+    ready = leg.arrival_time + timedelta(minutes=journey.boarding_buffer_minutes)
+    return ready <= journey.transport.departure_time
+
+
+def sync_final_day_return(
+        proposed: TripSchedule,
+        original: TripSchedule,
+        *,
+        resolve_route=None,
+) -> tuple[TripSchedule | None, bool]:
+    """Rebuild destination-side return access from proposed last activity.
+
+    Reuses long-distance transport + home access when boarding buffer still holds.
+    Returns (updated_schedule, ok).
+    """
+    journey = original.return_journey or proposed.return_journey
+    if journey is None:
+        return proposed, True
+    hub = journey.to_hub.destination_point
+    if hub is None:
+        return None, False
+
+    working = proposed
+    for _ in range(8):
+        origin, end_time, last_visit = _last_activity_point(working)
+        if origin is None or end_time is None:
+            return None, False
+        # Guard: never build return leg without a concrete origin point
+        if not getattr(origin, "id", None):
+            return None, False
+        leg = _build_return_access_leg(
+            origin, hub, end_time, working,
+            resolve_route=resolve_route, old_leg=journey.to_hub)
+        if end_time > leg.departure_time:
+            return None, False
+        if not _return_boarding_ok(leg, journey):
+            # Drop last future activity on final day and retry
+            stripped = _strip_last_final_visit(working)
+            if stripped is None or stripped is working:
+                return None, False
+            working = stripped
+            continue
+        new_journey = journey.model_copy(update={"to_hub": leg})
+        cutoff = journey.transport.departure_time - timedelta(
+            minutes=journey.boarding_buffer_minutes + leg.duration_minutes)
+        home_arrival = journey.to_origin.arrival_time
+        updates = {
+            "return_journey": new_journey,
+            "destination_activity_cutoff": cutoff,
+            "final_arrival_datetime": home_arrival,
+            "return_status": original.return_status,
+        }
+        # Update final day end_location
+        if working.days:
+            new_days = []
+            for day in working.days:
+                if day.role == "FINAL":
+                    new_days.append(day.model_copy(update={
+                        "end_location": origin,
+                        "activity_end": end_time if last_visit else day.activity_end,
+                    }))
+                else:
+                    new_days.append(day)
+            updates["days"] = tuple(new_days)
+        return working.model_copy(update=updates), True
+    return None, False
+
+
+def _strip_last_final_visit(schedule: TripSchedule) -> TripSchedule | None:
+    """Remove the last non-TRAVEL (+ trailing/leading travel to it) on FINAL day."""
+    if not schedule.days:
+        items = list(schedule.items)
+        # drop last visit and travel to it
+        idx = None
+        for i in range(len(items) - 1, -1, -1):
+            if items[i].item_type != "TRAVEL":
+                idx = i
+                break
+        if idx is None:
+            return None
+        # also drop preceding travel to this visit
+        start = idx
+        if start > 0 and items[start - 1].item_type == "TRAVEL":
+            start = start - 1
+        new_items = items[:start] + items[idx + 1:]
+        return schedule.model_copy(update={"items": tuple(new_items)})
+
+    new_days = []
+    changed = False
+    for day in schedule.days:
+        if day.role != "FINAL" or changed:
+            new_days.append(day)
+            continue
+        items = list(day.items)
+        idx = None
+        for i in range(len(items) - 1, -1, -1):
+            if items[i].item_type != "TRAVEL":
+                idx = i
+                break
+        if idx is None:
+            return None
+        start = idx
+        if start > 0 and items[start - 1].item_type == "TRAVEL":
+            start -= 1
+        new_items = items[:start] + items[idx + 1:]
+        new_days.append(day.model_copy(update={
+            "items": tuple(new_items),
+            "activity_end": new_items[-1].end_datetime if new_items else day.activity_start,
+        }))
+        changed = True
+    if not changed:
+        return None
+    flat = tuple(i for d in new_days for i in d.items)
+    return schedule.model_copy(update={"days": tuple(new_days), "items": flat})
+
+
+def _finalize_main_status(
+        original: TripSchedule,
+        proposed: TripSchedule,
+        effects: _Effects,
+        main_status: str,
+) -> str:
+    main_id = original.user_selected_place_id
+    if not main_id:
+        return main_status
+    if effects.reject_main or main_id in effects.exclude_place_ids:
+        return "REJECTED_BY_USER"
+    in_proposed = any(
+        i.place_id == main_id and i.item_type != "TRAVEL" for i in _flat_items(proposed))
+    if in_proposed:
+        return main_status if main_status != "INFEASIBLE" else "INCLUDED"
+    # MAIN was still future in original?
+    was_future = any(
+        i.place_id == main_id and i.item_type != "TRAVEL" for i in _flat_items(original))
+    if was_future:
+        return "INFEASIBLE"
+    return main_status
 
 
 def _assemble_schedule(
@@ -925,6 +1186,16 @@ def has_substantive_schedule_change(
         return True
     if _lodging_arrival_datetime(original) != _lodging_arrival_datetime(proposed):
         return True
+    oj = original.return_journey
+    pj = proposed.return_journey
+    if (oj is None) != (pj is None):
+        return True
+    if oj and pj:
+        if (oj.to_hub.origin_point and pj.to_hub.origin_point
+                and oj.to_hub.origin_point.id != pj.to_hub.origin_point.id):
+            return True
+        if oj.to_hub.departure_time != pj.to_hub.departure_time:
+            return True
     # Same places but start times shifted by more than 1 minute
     orig = {
         i.place_id: i.start_datetime
@@ -1023,7 +1294,7 @@ def replan_trip_schedule(
                 ReplanStatus.REPLAN_PARTIAL if removed else ReplanStatus.REPLAN_SUCCESS
             )
             if main_status == "INFEASIBLE":
-                notices.append("MAIN_INFEASIBLE: 남은 시간·귀가 제약으로 MAIN을 배치할 수 없습니다.")
+                notices.append("선택한 기준 장소를 현재 조건 안에 포함하기 어렵습니다.")
                 status = ReplanStatus.REPLAN_PARTIAL
             logger.info(
                 "replan outcome=%s attempt=%d removed=%d event=%s",

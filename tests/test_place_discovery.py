@@ -97,8 +97,8 @@ def test_main_ui_conditions_and_additional_search(monkeypatch, trip, selected, a
     app.text_input[1].set_value("구미")
     app.multiselect[0].set_value(["관광"])
     if conditions:
-        app.checkbox[1].set_value(True)
-        app.checkbox[2].set_value(True)
+        app.checkbox[0].set_value(True)  # 반려동물 동반
+        app.checkbox[1].set_value(True)  # 아이 동반
         app.text_input[2].set_value("땅콩")
     app.button[0].click().run()
     app.button(key="select_transport_1").click().run()
