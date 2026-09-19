@@ -49,7 +49,10 @@ def render_day_timeline(
         schedule: TripSchedule | None = None,
         items=(),
 ) -> None:
-    from services.route_detail_display import resolve_timeline_route_steps, route_step_lines
+    from services.route_detail_display import (
+        resolve_timeline_route_steps, route_step_lines,
+        format_minutes, total_travel_minutes_from_event,
+    )
 
     st.markdown("**일정 타임라인**")
     done = completed_keys or frozenset()
@@ -114,6 +117,14 @@ def render_day_timeline(
                     for step in steps:
                         for line in route_step_lines(step):
                             st.text(line)
+                    # Kakao totalTime (Schedule) can exceed sum(step.time); keep both.
+                    total = total_travel_minutes_from_event(event)
+                    if total is not None:
+                        st.caption(f"전체 이동 · {format_minutes(total)}")
+                        st.caption(
+                            "전체 시간에는 세부 구간으로 제공되지 않는 "
+                            "접근·대기 시간이 포함될 수 있습니다."
+                        )
     if view.return_summary is not None and view.return_summary.cutoff is not None:
         st.markdown("**귀가 요약**")
         st.caption(f"목적지 활동 종료 권장 한도: {view.return_summary.cutoff:%H:%M}")

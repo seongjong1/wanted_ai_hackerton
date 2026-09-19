@@ -90,16 +90,40 @@ def test_case1_2_timeline_travel_keeps_compact_and_detail_steps():
         origin=origin, destination=dest, travel_mode=("BUS", "WALKING"),
         travel_duration_minutes=22, route_steps=_steps())
     label = _travel_label(item)
-    assert "버스" in label and "도보" in label
+    assert label == "대중교통"
     event = TimelineEvent(
         kind="TRAVEL", start=item.start_datetime, end=item.end_datetime,
         title=f"{origin.name} → {dest.name}",
         detail=f"{label} · 약 22분",
         route_steps=item.route_steps)
-    assert "약 22분" in event.detail
+    assert event.detail == "대중교통 · 약 22분"
     steps = meaningful_route_steps(event.route_steps)
     assert [s.mode for s in steps] == ["WALKING", "BUS", "WALKING"]
     assert steps[1].line_name == "100번"
+
+
+def test_timeline_summary_walking_only_keeps_walk_label():
+    origin = AccessPoint(id="a", name="A", x=128.57, y=35.18)
+    dest = AccessPoint(id="b", name="B", x=128.571, y=35.181)
+    start = datetime(2026, 10, 1, 12, 0, tzinfo=KST)
+    item = ScheduleItem(
+        item_type="TRAVEL", place_id="b", place_name="B",
+        start_datetime=start, end_datetime=start + timedelta(minutes=5),
+        origin=origin, destination=dest, travel_mode=("WALKING",),
+        travel_duration_minutes=5)
+    assert _travel_label(item) == "도보"
+
+
+def test_timeline_summary_bus_only_uses_public_transit_word():
+    origin = AccessPoint(id="a", name="마산역", x=128.57, y=35.18)
+    dest = AccessPoint(id="b", name="동경복집", x=128.58, y=35.19)
+    start = datetime(2026, 10, 1, 12, 41, tzinfo=KST)
+    item = ScheduleItem(
+        item_type="TRAVEL", place_id="b", place_name="동경복집",
+        start_datetime=start, end_datetime=start + timedelta(minutes=22),
+        origin=origin, destination=dest, travel_mode=("BUS",),
+        travel_duration_minutes=22)
+    assert _travel_label(item) == "대중교통"
 
 
 def test_case7_no_route_steps_still_builds_compact_event():
@@ -113,6 +137,51 @@ def test_case7_no_route_steps_still_builds_compact_event():
         travel_duration_minutes=22)
     assert item.route_steps == ()
     assert meaningful_route_steps(item.route_steps) == []
+
+
+def test_detail_total_keeps_schedule_duration_when_steps_sum_smaller():
+    """Kakao totalTime (Schedule) can exceed sum(step.time); UI must not overwrite."""
+    from services.route_detail_display import (
+        route_steps_duration_minutes, total_travel_minutes_from_event, format_minutes)
+
+    origin = AccessPoint(id="a", name="마산역", x=128.57, y=35.18)
+    dest = AccessPoint(id="b", name="동경복집", x=128.58, y=35.19)
+    start = datetime(2026, 10, 1, 12, 41, tzinfo=KST)
+    # Two bus segments ~9 + ~7 = 16 min; TravelLeg span = 22 min (Kakao totalTime).
+    bus_only = (
+        AccessStep(mode="BUS", duration_seconds=540, distance_meters=2000,
+                   line_name="77", start_name="마산역종점", end_name="육호광장"),
+        AccessStep(mode="BUS", duration_seconds=420, distance_meters=1800,
+                   line_name="160", start_name="육호광장", end_name="오동동아구찜거리"),
+    )
+    item = ScheduleItem(
+        item_type="TRAVEL", place_id="b", place_name="동경복집",
+        start_datetime=start, end_datetime=start + timedelta(minutes=22),
+        origin=origin, destination=dest, travel_mode=("BUS",),
+        travel_duration_minutes=22, route_steps=bus_only)
+    event = TimelineEvent(
+        kind="TRAVEL", start=item.start_datetime, end=item.end_datetime,
+        title="마산역 → 동경복집", detail="버스 · 약 22분",
+        route_steps=item.route_steps)
+    step_sum = route_steps_duration_minutes(item.route_steps)
+    total = total_travel_minutes_from_event(event)
+    assert abs(step_sum - 16) < 0.01
+    assert total == 22
+    assert total > step_sum
+    assert format_minutes(total) == "22분"
+    # Schedule duration source of truth unchanged
+    assert item.travel_duration_minutes == 22
+
+
+def test_walking_steps_not_dropped_from_detail():
+    steps = (
+        AccessStep(mode="WALKING", duration_seconds=120, distance_meters=80,
+                   guidance="정류장까지 도보"),
+        AccessStep(mode="BUS", duration_seconds=540, distance_meters=2000, line_name="77"),
+        AccessStep(mode="WALKING", duration_seconds=90, distance_meters=60),
+    )
+    kept = meaningful_route_steps(steps)
+    assert [s.mode for s in kept] == ["WALKING", "BUS", "WALKING"]
 
 
 def test_provider_parses_enriched_payload(monkeypatch):
@@ -232,3 +301,14 @@ def test_timeline_recovers_travel_steps_from_schedule_item():
         detail="버스 · 약 27분")
     steps = resolve_timeline_route_steps(event, items=(item,))
     assert steps and steps[1].line_name == "100번"
+
+
+def test_detail_caption_mentions_access_wait_and_keeps_total():
+    from pathlib import Path
+
+    src = Path("services/schedule_visualization.py").read_text(encoding="utf-8")
+    assert "전체 이동 ·" in src
+    assert "접근·대기 시간이 포함될 수 있습니다" in src
+    assert "total_travel_minutes_from_event" in src
+    day = Path("services/schedule_day_view.py").read_text(encoding="utf-8")
+    assert 'return "대중교통"' in day

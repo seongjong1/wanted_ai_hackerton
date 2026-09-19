@@ -74,6 +74,10 @@ class KakaoTransitProvider:
                     routes.append(AccessRoute(duration_seconds=properties["totalTime"],
                                               distance_meters=properties["totalDistance"],
                                               transfers=properties["transfers"], steps=steps))
+                    # Note: Kakao totalTime often exceeds sum(step.time). The gap is usually
+                    # station access / egress / wait not exposed as separate steps. Schedule
+                    # timing must keep totalTime; UI lists steps as returned without inventing
+                    # filler minutes.
                 except (KeyError, TypeError, ValidationError):
                     continue  # Malformed alternative does not invalidate a valid route.
             if not routes:

@@ -17,19 +17,24 @@ MODE_LABELS = {
 
 
 def meaningful_route_steps(steps: tuple[AccessStep, ...] | list[AccessStep] | None) -> list[AccessStep]:
-    """Keep steps that carry real mode/time/distance/line/guidance — same filter as Access UI."""
+    """Keep every real Kakao segment (including WALKING / short transfers).
+
+    Only drop ESTIMATED placeholders and empty rows. Zero-duration rows with
+    guidance/stops are kept when Kakao returns them — never invent missing gaps.
+    """
     if not steps:
         return []
     out: list[AccessStep] = []
     for step in steps:
         mode = (getattr(step, "mode", "") or "").strip()
-        if not mode or mode == "ESTIMATED":
+        if not mode or mode.upper() == "ESTIMATED":
             continue
         if (getattr(step, "duration_seconds", 0) > 0
                 or getattr(step, "distance_meters", 0) > 0
                 or (getattr(step, "guidance", "") or "").strip()
                 or (getattr(step, "line_name", "") or "").strip()
-                or (getattr(step, "start_name", "") or "").strip()):
+                or (getattr(step, "start_name", "") or "").strip()
+                or (getattr(step, "end_name", "") or "").strip()):
             out.append(step)
     return out
 
@@ -41,6 +46,24 @@ def format_minutes(value: float) -> str:
 def mode_label(mode: str) -> str:
     key = (mode or "").strip().upper()
     return MODE_LABELS.get(key, mode.strip() if mode else "이동")
+
+
+def route_steps_duration_minutes(steps: list[AccessStep] | tuple[AccessStep, ...]) -> float:
+    return sum(float(getattr(s, "duration_seconds", 0) or 0) for s in steps) / 60.0
+
+
+def total_travel_minutes_from_event(event) -> float | None:
+    """Prefer timeline interval (matches Schedule TravelLeg), never invent from steps."""
+    start = getattr(event, "start", None)
+    end = getattr(event, "end", None)
+    if start is not None and end is not None:
+        try:
+            minutes = (end - start).total_seconds() / 60.0
+            if minutes > 0:
+                return minutes
+        except TypeError:
+            pass
+    return None
 
 
 def route_step_lines(step: AccessStep) -> list[str]:

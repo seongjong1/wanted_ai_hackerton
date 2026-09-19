@@ -170,10 +170,19 @@ def collect_coordinates(schedule: TripSchedule,
 
 
 def _travel_label(item: ScheduleItem) -> str:
+    """Compact Timeline summary — totalTime is whole-route time, not one bus segment."""
     if item.reason == "숙소 이동":
         return "숙소 이동"
-    modes = " + ".join(TRAVEL_MODE_LABELS.get(m, m) for m in item.travel_mode) or "이동"
-    return modes
+    modes = tuple(m.strip().upper() for m in (item.travel_mode or ()) if str(m).strip())
+    if not modes:
+        return "이동"
+    public = {"BUS", "SUBWAY", "TRAIN"}
+    if any(m in public for m in modes):
+        return "대중교통"
+    if modes == ("WALKING",) or set(modes) <= {"WALKING"}:
+        return "도보"
+    # Unknown / explicit vehicle-style modes: keep first mapped label.
+    return TRAVEL_MODE_LABELS.get(modes[0], modes[0])
 
 
 def _activity_detail(item: ScheduleItem) -> str:
